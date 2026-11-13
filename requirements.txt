@@ -7,3 +7,4 @@ pytest>=8.0
 matplotlib>=3.8
 imageio-ffmpeg>=0.5
 sb3-contrib>=2.3
+mlflow-skinny>=2.10

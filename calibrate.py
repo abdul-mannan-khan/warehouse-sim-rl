@@ -16,6 +16,7 @@ import optuna
 
 from warehouse_sim import SimConfig, WarehouseSim
 from warehouse_sim.policies import fifo
+from warehouse_sim.tracking import Tracker
 
 TUNED = ("pick_time_mean_min", "robot_speed_m_per_min", "congestion")
 HIDDEN_TRUTH = dict(pick_time_mean_min=0.62, robot_speed_m_per_min=48.0, congestion=0.09)
@@ -48,7 +49,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--trials", type=int, default=60)
     ap.add_argument("--shifts-per-trial", type=int, default=3)
+    ap.add_argument("--mlflow", action="store_true", help="log trials and result to MLflow (./mlruns)")
     args = ap.parse_args()
+    tracker = Tracker(args.mlflow, "warehouse-calibration")
 
     base = SimConfig()
     real_ct, real_thr = make_real_site_log(base)
@@ -64,21 +67,32 @@ def main():
         sim_ct, sim_thr = simulate(cand, seeds=range(args.shifts_per_trial))
         gap = wasserstein_1d(sim_ct, real_ct) + abs(sim_thr - real_thr) / max(real_thr, 1e-9) * 10.0
         trial.set_user_attr("throughput", sim_thr)
+        tracker.metrics({"gap": gap, "sim_throughput": sim_thr, **trial.params}, step=trial.number)
         return gap
 
-    study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=0))
-    study.optimize(objective, n_trials=args.trials, show_progress_bar=False)
+    with tracker.run("optuna-tpe", trials=args.trials, shifts_per_trial=args.shifts_per_trial, sampler="TPE", seed=0,
+                     observed_orders=int(real_ct.size)):
+        study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=0))
+        study.optimize(objective, n_trials=args.trials, show_progress_bar=False)
+        report = summarise(base, study, real_ct, args.shifts_per_trial)
+        tracker.metrics({"gap_uncalibrated_default": report["gap_uncalibrated_default"],
+                         "gap_calibrated_heldout_seeds": report["gap_calibrated_heldout_seeds"]})
+        tracker.metrics(report["best_params"], prefix="best_")
+        tracker.dict(report, "calibration_report.json")
+    print(json.dumps(report, indent=2))
 
-    default_ct, _ = simulate(base, seeds=range(args.shifts_per_trial))
-    best_ct, _ = simulate(base.with_(**study.best_params), seeds=range(10, 10 + args.shifts_per_trial))  # held-out seeds
-    report = {
+
+def summarise(base, study, real_ct, shifts):
+
+    default_ct, _ = simulate(base, seeds=range(shifts))
+    best_ct, _ = simulate(base.with_(**study.best_params), seeds=range(10, 10 + shifts))  # held-out seeds
+    return {
         "gap_uncalibrated_default": round(wasserstein_1d(default_ct, real_ct), 3),
         "gap_calibrated_heldout_seeds": round(wasserstein_1d(best_ct, real_ct), 3),
         "best_params": {k: round(v, 3) for k, v in study.best_params.items()},
         "hidden_truth": HIDDEN_TRUTH,
         "note": "parameters can trade off (e.g. slower picking vs more congestion); check identifiability, not just the gap",
     }
-    print(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":

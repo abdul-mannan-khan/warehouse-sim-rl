@@ -11,6 +11,7 @@ import numpy as np
 
 from warehouse_sim import SimConfig, WarehouseSim, WarehouseDispatchEnv
 from warehouse_sim.policies import BASELINES
+from warehouse_sim.tracking import Tracker
 
 EVAL_SEEDS = range(500, 520)   # never used in training
 
@@ -42,12 +43,18 @@ def summarise(ms: list[dict]) -> dict:
     return {k: (round(float(np.nanmean([m[k] for m in ms])), 3), round(float(np.nanstd([m[k] for m in ms])), 3)) for k in keys}
 
 
+def kw_log(kw: dict) -> dict:
+    return {k: v for k, v in kw.items() if k not in ("verbose", "seed")}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--timesteps", type=int, default=200_000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--masked", action="store_true", help="MaskablePPO (sb3-contrib): never choose an empty zone")
+    ap.add_argument("--mlflow", action="store_true", help="log hyperparameters, results and the model to MLflow")
     args = ap.parse_args()
+    tracker = Tracker(args.mlflow, "warehouse-dispatch-rl")
 
     from stable_baselines3.common.env_util import make_vec_env
 
@@ -60,12 +67,22 @@ def main():
     else:
         from stable_baselines3 import PPO
         model = PPO("MlpPolicy", venv, **kw)
-    model.learn(total_timesteps=args.timesteps)
     name = "maskable_ppo_dispatch" if args.masked else "ppo_dispatch"
-    model.save(name)
+    with tracker.run(name, timesteps=args.timesteps, seed=args.seed, n_envs=4, **kw_log(kw),
+                     arrival_rate_per_min=cfg.arrival_rate_per_min, n_robots=cfg.n_robots, eval_shifts=len(EVAL_SEEDS)):
+        model.learn(total_timesteps=args.timesteps)
+        model.save(name)
+        tracker.artifact(name + ".zip")
 
-    results = {name: evaluate_policy_fn(fn, cfg) for name, fn in BASELINES.items()}
-    results[name] = evaluate_agent(model, cfg, masked=args.masked)
+        results = {}
+        for pname, fn in BASELINES.items():
+            results[pname] = evaluate_policy_fn(fn, cfg)
+            with tracker.child(pname, kind="heuristic"):
+                tracker.metrics({k: v[0] for k, v in results[pname].items()})
+        results[name] = evaluate_agent(model, cfg, masked=args.masked)
+        tracker.metrics({k: v[0] for k, v in results[name].items()})
+        tracker.metrics({k + "_std": v[1] for k, v in results[name].items()})
+        tracker.dict(results, "results.json")
     print("mean, std over", len(EVAL_SEEDS), "held-out shifts")
     print(json.dumps(results, indent=2))
 

@@ -12,6 +12,22 @@ simulate → calibrate to reality → learn a policy → benchmark it honestly a
 *One 8-hour shift, identical orders (common random numbers), two heuristics and the learned masked-PPO policy. Full 60-second
 video: [media/demo.mp4](media/demo.mp4) — regenerate with `python render_video.py`.*
 
+### 3D replay (Blender Cycles, rendered on a cloud GPU)
+
+[![3D replay of one shift under the learned policy](media/demo_3d.gif)](media/demo_3d.mp4)
+
+*The same simulator output replayed in 3D: one 8-hour shift under the masked-PPO dispatch policy, 60 seconds at 1080p
+([media/demo_3d.mp4](media/demo_3d.mp4)). Every frame is computed from the SimPy event trace (no hand animation):*
+
+```bash
+python tools/export_trace.py --policy maskable_ppo_dispatch.zip --minutes 480 --out media/trace.json
+blender -b -P blender/render_3d.py -- --trace media/trace.json --out frames/ --samples 48 --res 1920x1080 --seconds 60
+ffmpeg -framerate 30 -i frames/%04d.png -c:v libx264 -pix_fmt yuv420p media/demo_3d.mp4
+```
+
+Rendered headless with Blender 4.2 on one RTX 3080 (OptiX rendering and denoising, about 1.3 s per frame;
+switching the denoiser from CPU to GPU made it 30 times faster on a small cloud machine).
+
 ## Model
 
 | Warehouse element | SimPy construct |
@@ -37,6 +53,11 @@ pip install -r requirements.txt
 pytest -q                          # determinism, conservation, capacity, priority, Gymnasium API
 python calibrate.py --trials 60    # Optuna: fit simulator parameters to observed cycle times
 python train.py --masked --timesteps 500000  # MaskablePPO vs heuristic baselines on 20 held-out shifts
+
+# optional: track every run with MLflow, then browse them
+python calibrate.py --trials 60 --mlflow
+python train.py --masked --timesteps 500000 --mlflow
+mlflow ui                          # http://127.0.0.1:5000
 ```
 
 ## Components
@@ -51,8 +72,13 @@ python train.py --masked --timesteps 500000  # MaskablePPO vs heuristic baseline
   simulated and observed cycle-time distributions plus a throughput term, then checks the result on
   held-out seeds.
 * `train.py` — Stable-Baselines3 PPO and evaluation against all baselines on held-out seeds (mean, std).
-* `render_video.py` — side-by-side animation of policies on the same shift (add `--model ppo_dispatch.zip`
+* `warehouse_sim/tracking.py` — optional **MLflow** experiment tracking (`--mlflow`). Calibration logs every Optuna
+  trial (gap and candidate parameters per step) and the final report; training logs hyperparameters, the model,
+  results on held-out shifts, and one nested run per heuristic baseline so they compare side by side in `mlflow ui`.
+* `render_video.py` — side-by-side animation of policies on the same shift (add `--model maskable_ppo_dispatch.zip`
   for a learned-policy panel).
+* `tools/export_trace.py` + `blender/render_3d.py` — export one simulated shift as an event trace and replay it in
+  3D with Blender Cycles on a GPU (headless, driven frame by frame from the trace; no baked keyframes).
 
 ## Results (default configuration, 1.8 orders/minute, 20 held-out shifts)
 
@@ -80,7 +106,7 @@ speed are recovered reasonably well; **congestion is poorly identified** from cy
 - [ ] Robot battery and charging stations (`simpy.Resource` with charging processes)
 - [ ] Aisle congestion as a capacity-limited resource instead of a travel-time factor
 - [ ] Calibrate against more statistics (per-zone cycle times, queue lengths) to identify congestion
-- [ ] Experiment tracking with MLflow
+- [x] Experiment tracking with MLflow
 - [ ] Sensitivity analysis over fleet size and arrival rate
 
 ## Licence
