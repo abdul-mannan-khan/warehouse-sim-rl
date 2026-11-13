@@ -1,0 +1,77 @@
+# warehouse-sim-rl
+
+A small **discrete-event simulator of a robot-assisted picking warehouse** (SimPy), wrapped as a
+**Gymnasium** environment for learning dispatch policies, with **Optuna** calibration of the simulator
+against observed site data.
+
+The point of the project is the full loop an applied simulation/RL team needs:
+simulate → calibrate to reality → learn a policy → benchmark it honestly against heuristics.
+
+## Model
+
+| Warehouse element | SimPy construct |
+|---|---|
+| Order backlog (orders wait to be assigned) | `simpy.FilterStore` |
+| Fleet of autonomous mobile robots | `simpy.Resource` (capacity = fleet size) |
+| Human pickers, one pool per zone | `simpy.Resource` per zone |
+| Packing station, rush orders served first | `simpy.PriorityResource` |
+
+An order arrives (Poisson), waits in the backlog, is assigned to a free robot by a **dispatch policy**,
+the robot drives to the order's zone (travel time grows with the number of robots moving — a simple
+congestion model), waits for a picker, the lines are picked, the robot returns, and the tote queues
+for packing. Rush orders have a 20-minute service level, normal orders 60 minutes.
+
+Demand and service times use **separate random streams** (common random numbers), so different policies
+and calibration candidates are compared on exactly the same orders.
+
+## Quick start
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+pytest -q                          # determinism, conservation, capacity, priority, Gymnasium API
+python calibrate.py --trials 60    # Optuna: fit simulator parameters to observed cycle times
+python train.py --timesteps 200000 # PPO vs heuristic baselines on 20 held-out shifts
+```
+
+## Components
+
+* `warehouse_sim/sim.py` — the SimPy model (`WarehouseSim`, `SimConfig`).
+* `warehouse_sim/policies.py` — heuristic baselines: first-in-first-out, rush-first, least-loaded zone.
+* `warehouse_sim/env.py` — `WarehouseDispatchEnv`: one step = one dispatch decision; observation =
+  per-zone backlog, rush backlog, oldest-order age and picker load; reward = on-time completions minus
+  late penalties (rush weighted double). Exposes `action_masks()` for masked policies.
+* `calibrate.py` — simulation-to-reality calibration. A hidden "real site" produces noisy cycle-time logs;
+  Optuna (TPE) searches pick time, robot speed and congestion to minimise the Wasserstein distance between
+  simulated and observed cycle-time distributions plus a throughput term, then checks the result on
+  held-out seeds.
+* `train.py` — Stable-Baselines3 PPO and evaluation against all baselines on held-out seeds (mean, std).
+
+## First results (default configuration, 1.8 orders/minute)
+
+| Policy | Orders/hour | Mean cycle time (min) | Late rate |
+|---|---|---|---|
+| First-in-first-out | ~92 | ~39 | ~25% |
+| Rush-first | ~94 | ~35 | ~14% |
+| Least-loaded zone | ~101 | ~18 | ~3% |
+| PPO, 150k steps, unmasked | ~96 | ~22 | ~7% |
+
+Calibration (40 trials): distribution gap 39.2 → 4.3 minutes on held-out seeds. Pick time and robot
+speed are recovered reasonably well; **congestion is poorly identified** from cycle times alone
+(it trades off against speed) — a reminder to check identifiability, not just goodness of fit.
+
+PPO beats the naive baselines but not the least-loaded-zone heuristic yet, and it still chooses empty
+zones (~120 invalid actions per shift). That is the next thing to fix.
+
+## Roadmap
+
+- [ ] Action masking (`sb3_contrib.MaskablePPO` with `action_masks()`) and reward shaping
+- [ ] Robot battery and charging stations (`simpy.Resource` with charging processes)
+- [ ] Aisle congestion as a capacity-limited resource instead of a travel-time factor
+- [ ] Calibrate against more statistics (per-zone cycle times, queue lengths) to identify congestion
+- [ ] Experiment tracking with MLflow
+- [ ] Sensitivity analysis over fleet size and arrival rate
+
+## Licence
+
+MIT
