@@ -230,14 +230,15 @@ def state_at(t):
         if o["at_zone"] is not None and t < o["at_zone"]:
             f = (t - o["dispatched"]) / max(o["at_zone"] - o["dispatched"], 1e-9)
             pos, heading, phase = DEPOT.lerp(zp, f), math.atan2(zp.y, zp.x), "out"
-        elif o["pick_end"] is not None and t < o["pick_end"]:
+        elif o["pick_end"] is None or t < o["pick_end"]:      # still at the zone when the shift ends
             k = zone_slot[o["zone"]]
             zone_slot[o["zone"]] += 1
             pos = zp + Vector((-0.2 - 1.1 * k, 0.0, 0.0))
             heading = 0.0
             phase = "pick" if (o["pick_start"] is not None and t >= o["pick_start"]) else "queue"
         else:
-            f = (t - o["pick_end"]) / max(o["back"] - o["pick_end"], 1e-9)
+            back = o["back"] if o["back"] is not None else o["pick_end"] + (o["at_zone"] - o["dispatched"])
+            f = min((t - o["pick_end"]) / max(back - o["pick_end"], 1e-9), 1.0)
             pos, heading, phase = zp.lerp(DEPOT, f), math.atan2(-zp.y, -zp.x), "back"
         robot_state[o["robot"]] = (pos, heading, phase, o["rush"])
     return waiting, robot_state, done, late, (ct_sum / done if done else 0.0)

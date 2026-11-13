@@ -28,6 +28,22 @@ ffmpeg -framerate 30 -i frames/%04d.png -c:v libx264 -pix_fmt yuv420p media/demo
 Rendered headless with Blender 4.2 on one RTX 3080 (OptiX rendering and denoising, about 1.3 s per frame;
 switching the denoiser from CPU to GPU made it 30 times faster on a small cloud machine).
 
+### NVIDIA Isaac Sim replay
+
+[![The same shift replayed in NVIDIA Isaac Sim](media/demo_isaac.gif)](media/demo_isaac.mp4)
+
+*The same event trace replayed in **NVIDIA Isaac Sim 6.2** with iw.hub warehouse robots, pallet racking and
+cardboard-box assets from NVIDIA's public asset library, rendered with the RTX renderer through Replicator
+([media/demo_isaac.mp4](media/demo_isaac.mp4)). Robots are moved kinematically from the trace, so the video shows
+exactly what the SimPy model decided; distances are compressed so the whole floor fits one view.*
+
+```bash
+# on a Linux RTX GPU with the nvcr.io/nvidia/isaac-sim:6.2.0 container
+/isaac-sim/python.sh isaac/replay_isaac.py --trace media/trace.json --out frames/ --seconds 60
+/isaac-sim/python.sh isaac/overlay.py frames/
+ffmpeg -framerate 30 -i frames/%04d.png -c:v libx264 -pix_fmt yuv420p media/demo_isaac.mp4
+```
+
 ## Model
 
 | Warehouse element | SimPy construct |
@@ -79,6 +95,8 @@ mlflow ui                          # http://127.0.0.1:5000
   for a learned-policy panel).
 * `tools/export_trace.py` + `blender/render_3d.py` — export one simulated shift as an event trace and replay it in
   3D with Blender Cycles on a GPU (headless, driven frame by frame from the trace; no baked keyframes).
+* `isaac/replay_isaac.py` + `isaac/overlay.py` — the same replay in NVIDIA Isaac Sim (USD stage, iw.hub robots,
+  RTX rendering through Replicator), with the clock and KPIs drawn on afterwards.
 
 ## Results (default configuration, 1.8 orders/minute, 20 held-out shifts)
 
