@@ -7,6 +7,11 @@ against observed site data.
 The point of the project is the full loop an applied simulation/RL team needs:
 simulate → calibrate to reality → learn a policy → benchmark it honestly against heuristics.
 
+![Same orders under two dispatch policies](media/demo.gif)
+
+*One 8-hour shift, identical orders (common random numbers), two dispatch policies. Full 60-second
+video: [media/demo.mp4](media/demo.mp4) — regenerate with `python render_video.py`.*
+
 ## Model
 
 | Warehouse element | SimPy construct |
@@ -46,6 +51,8 @@ python train.py --timesteps 200000 # PPO vs heuristic baselines on 20 held-out s
   simulated and observed cycle-time distributions plus a throughput term, then checks the result on
   held-out seeds.
 * `train.py` — Stable-Baselines3 PPO and evaluation against all baselines on held-out seeds (mean, std).
+* `render_video.py` — side-by-side animation of policies on the same shift (add `--model ppo_dispatch.zip`
+  for a learned-policy panel).
 
 ## First results (default configuration, 1.8 orders/minute)
 

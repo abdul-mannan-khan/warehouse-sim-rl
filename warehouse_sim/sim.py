@@ -56,6 +56,10 @@ class Order:
     lines: int
     rush: bool
     dispatched: Optional[float] = None
+    at_zone: Optional[float] = None       # robot reached the zone
+    pick_start: Optional[float] = None
+    pick_end: Optional[float] = None
+    back: Optional[float] = None          # robot back at the depot
     done: Optional[float] = None
 
     @property
@@ -152,14 +156,18 @@ class WarehouseSim:
         self.robots_travelling += 1
         yield self.env.timeout(travel)
         self.robots_travelling -= 1
+        order.at_zone = self.env.now
 
         with self.pickers[order.zone].request() as picker:
             yield picker
+            order.pick_start = self.env.now
             yield self.env.timeout(sum(self.rng_service.exponential(cfg.pick_time_mean_min) for _ in range(order.lines)))
+            order.pick_end = self.env.now
 
         self.robots_travelling += 1
         yield self.env.timeout(travel)
         self.robots_travelling -= 1
+        order.back = self.env.now
         self.robots.release(robot)
 
         with self.packing.request(priority=0 if order.rush else 1) as packer:
