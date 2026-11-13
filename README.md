@@ -12,37 +12,25 @@ simulate → calibrate to reality → learn a policy → benchmark it honestly a
 *One 8-hour shift, identical orders (common random numbers), two heuristics and the learned masked-PPO policy. Full 60-second
 video: [media/demo.mp4](media/demo.mp4) — regenerate with `python render_video.py`.*
 
-### 3D replay (Blender Cycles, rendered on a cloud GPU)
-
-[![3D replay of one shift under the learned policy](media/demo_3d.gif)](media/demo_3d.mp4)
-
-*The same simulator output replayed in 3D: one 8-hour shift under the masked-PPO dispatch policy, 60 seconds at 1080p
-([media/demo_3d.mp4](media/demo_3d.mp4)). Every frame is computed from the SimPy event trace (no hand animation):*
-
-```bash
-python tools/export_trace.py --policy maskable_ppo_dispatch.zip --minutes 480 --out media/trace.json
-blender -b -P blender/render_3d.py -- --trace media/trace.json --out frames/ --samples 48 --res 1920x1080 --seconds 60
-ffmpeg -framerate 30 -i frames/%04d.png -c:v libx264 -pix_fmt yuv420p media/demo_3d.mp4
-```
-
-Rendered headless with Blender 4.2 on one RTX 3080 (OptiX rendering and denoising, about 1.3 s per frame;
-switching the denoiser from CPU to GPU made it 30 times faster on a small cloud machine).
-
-### NVIDIA Isaac Sim replay
+### 3D replay in NVIDIA Isaac Sim
 
 [![The same shift replayed in NVIDIA Isaac Sim](media/demo_isaac.gif)](media/demo_isaac.mp4)
 
-*The same event trace replayed in **NVIDIA Isaac Sim 6.2** with iw.hub warehouse robots, pallet racking and
-cardboard-box assets from NVIDIA's public asset library, rendered with the RTX renderer through Replicator
-([media/demo_isaac.mp4](media/demo_isaac.mp4)). Robots are moved kinematically from the trace, so the video shows
-exactly what the SimPy model decided; distances are compressed so the whole floor fits one view.*
+*One 8-hour shift under the learned masked-PPO dispatch policy, replayed in **NVIDIA Isaac Sim 6.2** with iw.hub
+warehouse robots and cardboard-box assets from NVIDIA's public asset library, rendered with the RTX renderer through
+Replicator (60 seconds at 1080p: [media/demo_isaac.mp4](media/demo_isaac.mp4); the preview above runs at 3x speed).
+Every frame is computed from the SimPy event trace and robots are moved kinematically, so the video shows exactly what
+the simulator decided; distances are compressed so the whole floor fits one view.*
 
 ```bash
+python tools/export_trace.py --policy maskable_ppo_dispatch.zip --minutes 480 --out media/trace.json
 # on a Linux RTX GPU with the nvcr.io/nvidia/isaac-sim:6.2.0 container
 /isaac-sim/python.sh isaac/replay_isaac.py --trace media/trace.json --out frames/ --seconds 60
 /isaac-sim/python.sh isaac/overlay.py frames/
 ffmpeg -framerate 30 -i frames/%04d.png -c:v libx264 -pix_fmt yuv420p media/demo_isaac.mp4
 ```
+
+Rendered headless on one RTX 4090 rented on Vast.ai (about 0.5 s per frame).
 
 ## Model
 
@@ -93,10 +81,9 @@ mlflow ui                          # http://127.0.0.1:5000
   results on held-out shifts, and one nested run per heuristic baseline so they compare side by side in `mlflow ui`.
 * `render_video.py` — side-by-side animation of policies on the same shift (add `--model maskable_ppo_dispatch.zip`
   for a learned-policy panel).
-* `tools/export_trace.py` + `blender/render_3d.py` — export one simulated shift as an event trace and replay it in
-  3D with Blender Cycles on a GPU (headless, driven frame by frame from the trace; no baked keyframes).
-* `isaac/replay_isaac.py` + `isaac/overlay.py` — the same replay in NVIDIA Isaac Sim (USD stage, iw.hub robots,
-  RTX rendering through Replicator), with the clock and KPIs drawn on afterwards.
+* `tools/export_trace.py` + `isaac/replay_isaac.py` + `isaac/overlay.py` — export one simulated shift as an event trace
+  and replay it in NVIDIA Isaac Sim (USD stage, iw.hub robots, RTX rendering through Replicator, driven frame by frame
+  from the trace), with the clock and KPIs drawn on afterwards.
 
 ## Results (default configuration, 1.8 orders/minute, 20 held-out shifts)
 

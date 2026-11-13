@@ -1,4 +1,4 @@
-"""Export one simulated shift as a JSON event trace (for the 3D Blender replay in blender/render_3d.py).
+"""Export one simulated shift as a JSON event trace (for the NVIDIA Isaac Sim replay in isaac/replay_isaac.py).
 
     python tools/export_trace.py --policy least_loaded_zone --minutes 120 --out media/trace.json
 """
