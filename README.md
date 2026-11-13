@@ -7,9 +7,9 @@ against observed site data.
 The point of the project is the full loop an applied simulation/RL team needs:
 simulate → calibrate to reality → learn a policy → benchmark it honestly against heuristics.
 
-![Same orders under two dispatch policies](media/demo.gif)
+![Same orders under three dispatch policies](media/demo.gif)
 
-*One 8-hour shift, identical orders (common random numbers), two dispatch policies. Full 60-second
+*One 8-hour shift, identical orders (common random numbers), two heuristics and the learned masked-PPO policy. Full 60-second
 video: [media/demo.mp4](media/demo.mp4) — regenerate with `python render_video.py`.*
 
 ## Model
@@ -36,7 +36,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 pytest -q                          # determinism, conservation, capacity, priority, Gymnasium API
 python calibrate.py --trials 60    # Optuna: fit simulator parameters to observed cycle times
-python train.py --timesteps 200000 # PPO vs heuristic baselines on 20 held-out shifts
+python train.py --masked --timesteps 500000  # MaskablePPO vs heuristic baselines on 20 held-out shifts
 ```
 
 ## Components
@@ -54,25 +54,29 @@ python train.py --timesteps 200000 # PPO vs heuristic baselines on 20 held-out s
 * `render_video.py` — side-by-side animation of policies on the same shift (add `--model ppo_dispatch.zip`
   for a learned-policy panel).
 
-## First results (default configuration, 1.8 orders/minute)
+## Results (default configuration, 1.8 orders/minute, 20 held-out shifts)
 
-| Policy | Orders/hour | Mean cycle time (min) | Late rate |
-|---|---|---|---|
-| First-in-first-out | ~92 | ~39 | ~25% |
-| Rush-first | ~94 | ~35 | ~14% |
-| Least-loaded zone | ~101 | ~18 | ~3% |
-| PPO, 150k steps, unmasked | ~96 | ~22 | ~7% |
+| Policy | Orders/hour | Mean cycle time (min) | 95th-percentile cycle (min) | Late rate | Rush late rate |
+|---|---|---|---|---|---|
+| First-in-first-out | 93.7 | 32.5 | 69.4 | 20.5% | 1.3% |
+| Rush-first | 93.8 | 32.7 | 69.3 | 16.8% | 0.0% |
+| Least-loaded zone | 101.6 | 17.5 | 47.5 | 2.8% | 0.0% |
+| **Masked PPO** (500k steps) | 95.1 | 19.2 | 49.8 | **2.6%** | 2.2% |
+
+`python train.py --masked --timesteps 500000`. Masking (`sb3_contrib.MaskablePPO` with `action_masks()`)
+removed the invalid empty-zone choices of plain PPO (about 120 per shift) and brought the learned policy level
+with the best heuristic on overall late rate, from scratch and without hand-written rules. It does not yet beat
+it on throughput or on rush orders: the reward weights rush lateness only 2x, and the observation has no
+explicit picker-queue forecast. Those are the next experiments.
 
 Calibration (40 trials): distribution gap 39.2 → 4.3 minutes on held-out seeds. Pick time and robot
 speed are recovered reasonably well; **congestion is poorly identified** from cycle times alone
 (it trades off against speed) — a reminder to check identifiability, not just goodness of fit.
 
-PPO beats the naive baselines but not the least-loaded-zone heuristic yet, and it still chooses empty
-zones (~120 invalid actions per shift). That is the next thing to fix.
-
 ## Roadmap
 
-- [ ] Action masking (`sb3_contrib.MaskablePPO` with `action_masks()`) and reward shaping
+- [x] Action masking (`sb3_contrib.MaskablePPO` with `action_masks()`)
+- [ ] Reward shaping for rush orders; picker-queue features in the observation
 - [ ] Robot battery and charging stations (`simpy.Resource` with charging processes)
 - [ ] Aisle congestion as a capacity-limited resource instead of a travel-time factor
 - [ ] Calibrate against more statistics (per-zone cycle times, queue lengths) to identify congestion

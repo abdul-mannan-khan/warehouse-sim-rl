@@ -1,7 +1,7 @@
 """Render a side-by-side demo video: the same shift of orders under two dispatch policies.
 
     python render_video.py --minutes 240 --seconds 60 --out media/demo.mp4
-    python render_video.py --model ppo_dispatch.zip      # third panel with a trained PPO policy
+    python render_video.py --model maskable_ppo_dispatch.zip   # third panel with a trained policy
 """
 from __future__ import annotations
 
@@ -32,11 +32,12 @@ def run_policy(cfg, policy_fn):
     return sim
 
 
-def run_agent(cfg, model):
+def run_agent(cfg, model, masked=False):
     env = WarehouseDispatchEnv(cfg, randomise_seed=False)
     obs, _ = env.reset()
     while True:
-        a, _ = model.predict(obs, deterministic=True)
+        kw = {"action_masks": env.action_masks()} if masked else {}
+        a, _ = model.predict(obs, deterministic=True, **kw)
         obs, _, term, trunc, _ = env.step(a)
         if term or trunc:
             return env.sim
@@ -122,8 +123,12 @@ def main():
     sims = [("First-in-first-out dispatch", run_policy(cfg, BASELINES["fifo"])),
             ("Least-loaded-zone dispatch", run_policy(cfg, BASELINES["least_loaded_zone"]))]
     if args.model:
-        from stable_baselines3 import PPO
-        sims.append(("PPO dispatch (learned)", run_agent(cfg, PPO.load(args.model))))
+        if "maskable" in os.path.basename(args.model):
+            from sb3_contrib import MaskablePPO
+            sims.append(("Masked PPO dispatch (learned)", run_agent(cfg, MaskablePPO.load(args.model), masked=True)))
+        else:
+            from stable_baselines3 import PPO
+            sims.append(("PPO dispatch (learned)", run_agent(cfg, PPO.load(args.model))))
 
     n = len(sims)
     fig = plt.figure(figsize=(6.4 * n, 7.2), dpi=100)
