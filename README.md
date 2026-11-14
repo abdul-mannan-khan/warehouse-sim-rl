@@ -16,21 +16,41 @@ video: [media/demo.mp4](media/demo.mp4) — regenerate with `python render_video
 
 [![The same shift replayed in NVIDIA Isaac Sim](media/demo_isaac.gif)](media/demo_isaac.mp4)
 
-*One 8-hour shift under the learned masked-PPO dispatch policy, replayed in **NVIDIA Isaac Sim 6.2** with iw.hub
-warehouse robots and cardboard-box assets from NVIDIA's public asset library, rendered with the RTX renderer through
-Replicator (60 seconds at 1080p: [media/demo_isaac.mp4](media/demo_isaac.mp4); the preview above runs at 3x speed).
-Every frame is computed from the SimPy event trace and robots are moved kinematically, so the video shows exactly what
-the simulator decided; distances are compressed so the whole floor fits one view.*
+*Full 60-second video at 1080p: [media/demo_isaac.mp4](media/demo_isaac.mp4) (the preview above runs at 3x speed).*
+
+| Following one robot to its pick zone | A picker loading a robot's tote |
+|---|---|
+| ![Follow camera](media/isaac_follow.jpg) | ![Pick aisle](media/isaac_aisle.jpg) |
+
+One 8-hour shift under the learned masked-PPO dispatch policy, replayed inside NVIDIA's warehouse digital twin
+(`full_warehouse.usd`) in **Isaac Sim 6.2**, rendered headless with the RTX renderer through Replicator.
+
+* **Driven by the simulator, frame by frame.** `tools/export_trace.py` records every order's life cycle (created,
+  dispatched, arrived at the zone, pick start and end, back at the depot, packed). For each frame the replay works out
+  where every order is and places the robots accordingly, so the video shows exactly what the SimPy model decided.
+* **Real warehouse layout.** The model's four picking zones are four rack aisles; the depot is a packing area with
+  six robot docks on the open floor. Robots (NVIDIA's iw.hub AMR carrying a KLT tote) drive a two-lane route along the
+  cross aisle into their zone, queue behind the robot being picked, and return on the opposite lane. Tote colour shows
+  the order state: blue normal, red rush, green being picked, grey empty.
+* **Animated people.** NVIDIA's motion clips are authored for a biped rig, but the character models use a Reallusion
+  skeleton, so binding them directly leaves the characters in T-pose. `isaac/retarget.py` retargets the clips by
+  transferring each joint's rotation from its rest pose in skeleton space. A picker plays a picking gesture while
+  the simulator says a pick is in progress.
+* **Edited like a product video.** Five shots (establishing crane, a camera following one robot, a picking aisle, the
+  packing area, an overview of the rest of the shift), each covering a different stretch of the shift at its own
+  time-lapse rate, shown on screen with the clock and live KPIs.
 
 ```bash
 python tools/export_trace.py --policy maskable_ppo_dispatch.zip --minutes 480 --out media/trace.json
 # on a Linux RTX GPU with the nvcr.io/nvidia/isaac-sim:6.2.0 container
-/isaac-sim/python.sh isaac/replay_isaac.py --trace media/trace.json --out frames/ --seconds 60
+/isaac-sim/python.sh isaac/replay_isaac.py --trace media/trace.json --out frames/ --preview  # one still per shot
+/isaac-sim/python.sh isaac/replay_isaac.py --trace media/trace.json --out frames/
 /isaac-sim/python.sh isaac/overlay.py frames/
-ffmpeg -framerate 30 -i frames/%04d.png -c:v libx264 -pix_fmt yuv420p media/demo_isaac.mp4
+ffmpeg -framerate 30 -i frames/%04d.png -c:v libx264 -crf 18 -pix_fmt yuv420p media/demo_isaac.mp4
 ```
 
-Rendered headless on one RTX 4090 rented on Vast.ai (about 0.5 s per frame).
+Rendered on one RTX 4090 rented on Vast.ai, about 1.2 s per 1080p frame (around 40 minutes for the video).
+Travel times come from the simulator, so route lengths in the replay are not to the model's distance scale.
 
 ## Model
 
@@ -81,9 +101,10 @@ mlflow ui                          # http://127.0.0.1:5000
   results on held-out shifts, and one nested run per heuristic baseline so they compare side by side in `mlflow ui`.
 * `render_video.py` — side-by-side animation of policies on the same shift (add `--model maskable_ppo_dispatch.zip`
   for a learned-policy panel).
-* `tools/export_trace.py` + `isaac/replay_isaac.py` + `isaac/overlay.py` — export one simulated shift as an event trace
-  and replay it in NVIDIA Isaac Sim (USD stage, iw.hub robots, RTX rendering through Replicator, driven frame by frame
-  from the trace), with the clock and KPIs drawn on afterwards.
+* `tools/export_trace.py` + `isaac/replay_isaac.py` + `isaac/retarget.py` + `isaac/overlay.py` — export one simulated
+  shift as an event trace and replay it in NVIDIA Isaac Sim: the warehouse digital twin, iw.hub robots on aisle routes,
+  retargeted character animation, a multi-shot camera, and RTX rendering through Replicator, driven frame by frame from
+  the trace, with titles, clock and KPIs drawn on afterwards.
 
 ## Results (default configuration, 1.8 orders/minute, 20 held-out shifts)
 

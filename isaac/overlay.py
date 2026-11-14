@@ -1,4 +1,8 @@
-"""Add clock, KPIs and labels to the raw Isaac Sim frames (in place).  python overlay.py frames/ [hud.json]"""
+"""Draw titles, clock, KPIs and labels onto the Isaac Sim frames (in place).
+
+    python overlay.py frames/            # reads every hud_*.json in the folder
+"""
+import glob
 import json
 import os
 import sys
@@ -6,47 +10,147 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 d = sys.argv[1]
-H = json.load(open(os.path.join(d, sys.argv[2] if len(sys.argv) > 2 else "hud.json")))
-L = H["labels"]
-FONT = next((p for p in ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"] if os.path.exists(p)), None)
+FR, META = {}, None
+for p in sorted(glob.glob(os.path.join(d, "hud_*.json"))):
+    j = json.load(open(p))
+    META = j["meta"]
+    for h in j["frames"]:
+        FR[h["frame"]] = h
+W, H, FPS, N = META["W"], META["H"], META["fps"], META["n_frames"]
+s = W / 1920
+SHOT_START, acc = [], 0
+for sh in META["shots"]:
+    SHOT_START.append(acc)
+    acc += int(round(sh[1] * FPS))
+
+REG = next((p for p in ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                        "C:/Windows/Fonts/segoeui.ttf"] if os.path.exists(p)), None)
+BOLD = next((p for p in ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                         "C:/Windows/Fonts/segoeuib.ttf"] if os.path.exists(p)), None)
 
 
 def font(px, bold=False):
-    if FONT:
-        return ImageFont.truetype(FONT.replace("Sans.ttf", "Sans-Bold.ttf") if bold else FONT, px)
-    return ImageFont.load_default(size=px)
+    f = BOLD if bold else REG
+    return ImageFont.truetype(f, int(px * s)) if f else ImageFont.load_default(size=int(px * s))
 
 
-s = L["W"] / 1920
-F_T, F_S, F_K, F_L, F_Z = font(int(44 * s), True), font(int(26 * s)), font(int(30 * s)), font(int(21 * s)), font(int(34 * s), True)
+F = {"title": font(26, True), "sub": font(19), "clock": font(44, True), "rate": font(18, True),
+     "cap": font(30, True), "capsub": font(19), "kpi": font(30, True), "kpil": font(16), "lab": font(20, True),
+     "big": font(62, True), "bigsub": font(28), "end": font(34), "endb": font(40, True)}
+WHITE, GREY, ACCENT = (255, 255, 255, 255), (190, 198, 210, 255), (118, 185, 0, 255)   # NVIDIA-ish green accent
+PANEL = (10, 13, 18, 175)
+TOTE = {"normal": (40, 110, 245, 255), "rush": (240, 50, 40, 255), "pick": (40, 215, 90, 255), "idle": (140, 145, 150, 255)}
 
 
-def shadowed(dr, xy, text, f, fill=(255, 255, 255)):
-    dr.text((xy[0] + 2, xy[1] + 2), text, font=f, fill=(0, 0, 0, 200))
-    dr.text(xy, text, font=f, fill=fill)
+def S(v):
+    return int(v * s)
 
 
-for h in H["frames"]:
-    name = "preview.png" if len(H["frames"]) == 1 and os.path.exists(os.path.join(d, "preview.png")) else f"{h['frame']:04d}.png"
-    p = os.path.join(d, name)
-    im = Image.open(p).convert("RGBA")
+def panel(dr, box, r=12, fill=PANEL):
+    dr.rounded_rectangle([S(box[0]), S(box[1]), S(box[2]), S(box[3])], radius=S(r), fill=fill)
+
+
+def text(dr, xy, t, f, fill=WHITE, anchor="la"):
+    dr.text((S(xy[0]), S(xy[1])), t, font=f, fill=fill, anchor=anchor)
+
+
+def clock(t):
+    m = int(round(t))
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def draw(im, h):
     ov = Image.new("RGBA", im.size, (0, 0, 0, 0))
     dr = ImageDraw.Draw(ov)
-    W, Hh = im.size
-    dr.rectangle([0, 0, W, int(118 * s)], fill=(8, 10, 14, 170))
-    dr.rectangle([0, Hh - int(92 * s), W, Hh], fill=(8, 10, 14, 190))
-    shadowed(dr, (int(40 * s), int(18 * s)), "SimPy warehouse simulator, replayed in NVIDIA Isaac Sim", F_T)
-    shadowed(dr, (int(40 * s), int(72 * s)), f"Dispatch policy: {L['policy']}   |   {L['n_robots']} iw.hub robots, {L['nz']} zones", F_S)
-    t = h["t"]
-    shadowed(dr, (W - int(300 * s), int(24 * s)), f"t = {int(t) // 60:02d}:{int(t) % 60:02d}", F_T)
-    shadowed(dr, (int(40 * s), Hh - int(84 * s)),
-             f"done {h['done']}    late {h['late']}    mean cycle time {h['ct']:4.1f} min    waiting {h['waiting']}", F_K)
-    shadowed(dr, (int(40 * s), Hh - int(38 * s)),
-             "blue tote = normal order    red = rush order    green = being picked    cubes = orders waiting", F_L,
-             (215, 220, 230))
-    for z, (x, y) in enumerate(L["zones"]):
-        shadowed(dr, (x, y), f"Zone {z + 1}", F_Z)
-    shadowed(dr, tuple(L["depot"]), "Depot + packing", F_Z)
-    Image.alpha_composite(im, ov).convert("RGB").save(p)
-print("overlay done", len(H["frames"]))
+    f = h["frame"]
+    # header
+    panel(dr, (28, 24, 820, 108))
+    dr.rectangle([S(28), S(24), S(34), S(108)], fill=ACCENT)
+    text(dr, (52, 36), "Warehouse picking simulation  \u2022  NVIDIA Isaac Sim replay", F["title"])
+    text(dr, (52, 74), f"SimPy discrete-event model  \u2022  dispatch policy: {META['policy']}", F["sub"], GREY)
+    # clock + time-lapse rate
+    panel(dr, (1640, 24, 1892, 128))
+    text(dr, (1866, 32), "SHIFT TIME", F["kpil"], GREY, "ra")
+    text(dr, (1866, 52), clock(h["t"]), F["clock"], WHITE, "ra")
+    rate = h["rate"]
+    rtxt = f"{rate:,.0f}x time-lapse" if rate >= 1.5 else "real time"
+    text(dr, (1866, 104), rtxt, F["rate"], ACCENT, "ra")
+    # KPI panel
+    panel(dr, (1400, 820, 1892, 1052))
+    k = [("Orders done", f"{h['done']}"), ("Late", f"{h['late']}"), ("Mean cycle", f"{h['ct']:.1f} min")]
+    for i, (lab, val) in enumerate(k):
+        x = 1424 + i * 150
+        text(dr, (x, 836), lab, F["kpil"], GREY)
+        text(dr, (x, 856), val, F["kpi"])
+    text(dr, (1424, 912), "Orders waiting per zone", F["kpil"], GREY)
+    mx = max(12, max(h["waiting"]))
+    for z, w in enumerate(h["waiting"]):
+        y = 938 + z * 26
+        text(dr, (1424, y), f"Z{z + 1}", F["kpil"], GREY)
+        dr.rounded_rectangle([S(1460), S(y + 3), S(1460 + 370), S(y + 17)], radius=S(5), fill=(255, 255, 255, 40))
+        if w:
+            dr.rounded_rectangle([S(1460), S(y + 3), S(1460 + 370 * w / mx), S(y + 17)], radius=S(5),
+                                 fill=(255, 180, 40, 230))
+        text(dr, (1846, y), str(w), F["kpil"], WHITE)
+    # caption (lower third) + tote legend
+    cap = h["caption"]
+    tw = dr.textlength(cap, font=F["cap"]) / s
+    panel(dr, (28, 950, 28 + max(tw, 640) + 48, 1052))
+    dr.rectangle([S(28), S(950), S(34), S(1052)], fill=ACCENT)
+    text(dr, (52, 962), cap, F["cap"])
+    lx = 52
+    for key, lab in [("normal", "normal order"), ("rush", "rush order"), ("pick", "being picked"), ("idle", "empty")]:
+        dr.rounded_rectangle([S(lx), S(1014), S(lx + 22), S(1032)], radius=S(4), fill=TOTE[key])
+        text(dr, (lx + 30, 1012), lab, F["capsub"], GREY)
+        lx += 30 + dr.textlength(lab, font=F["capsub"]) / s + 28
+    # labels
+    for lab, (x, y) in h["labels"].items():
+        tw = dr.textlength(lab, font=F["lab"])
+        x0, y0 = x - tw / 2 - S(12), y - S(40)
+        dr.rounded_rectangle([x0, y0, x0 + tw + S(24), y0 + S(32)], radius=S(8), fill=(10, 13, 18, 200))
+        dr.line([x, y0 + S(32), x, y - S(4)], fill=ACCENT, width=max(1, S(2)))
+        dr.ellipse([x - S(5), y - S(5), x + S(5), y + S(5)], fill=ACCENT)
+        dr.text((x, y0 + S(16)), lab, font=F["lab"], fill=WHITE, anchor="mm")
+    out = Image.alpha_composite(im, ov)
+
+    # title card over the first seconds, end card over the last seconds, dips to black between shots
+    fx = Image.new("RGBA", im.size, (0, 0, 0, 0))
+    dx = ImageDraw.Draw(fx)
+    title_a = max(0.0, min(1.0, (3.2 * FPS - f) / (0.8 * FPS)))
+    if title_a > 0:
+        dx.rectangle([0, 0, W, H], fill=(6, 8, 12, int(200 * title_a)))
+        a = int(255 * title_a)
+        dx.text((W / 2, H / 2 - S(70)), "Robot-assisted warehouse picking", font=F["big"], fill=(255, 255, 255, a), anchor="mm")
+        dx.text((W / 2, H / 2 + S(10)), "One 8-hour shift from a SimPy simulator, replayed in NVIDIA Isaac Sim",
+                font=F["bigsub"], fill=(200, 208, 220, a), anchor="mm")
+        dx.text((W / 2, H / 2 + S(60)), f"{META['n_robots']} iw.hub robots  \u2022  {META['nz']} picking zones  \u2022  "
+                f"dispatch policy: {META['policy']}", font=F["bigsub"], fill=(118, 185, 0, a), anchor="mm")
+    end_a = max(0.0, min(1.0, (f - (N - 3.5 * FPS)) / (0.8 * FPS)))
+    if end_a > 0:
+        dx.rectangle([0, 0, W, H], fill=(6, 8, 12, int(215 * end_a)))
+        a = int(255 * end_a)
+        late_pct = 100.0 * h["late"] / max(h["done"], 1)
+        dx.text((W / 2, H / 2 - S(110)), "End of shift", font=F["big"], fill=(255, 255, 255, a), anchor="mm")
+        lines = [f"{h['done']} orders completed  \u2022  {late_pct:.1f}% late  \u2022  mean cycle time {h['ct']:.1f} min",
+                 "Every robot position comes from the simulator's event trace",
+                 "github.com/abdul-mannan-khan/warehouse-sim-rl"]
+        for i, ln in enumerate(lines):
+            dx.text((W / 2, H / 2 - S(10) + S(56) * i), ln, font=F["endb"] if i == 0 else F["end"],
+                    fill=(255, 255, 255, a) if i == 0 else (200, 208, 220, a), anchor="mm")
+    dip = 0.0
+    for st in SHOT_START[1:]:
+        dd = abs(f - (st - 0.5))
+        if dd < 6:
+            dip = max(dip, 1.0 - dd / 6)
+    if dip > 0:
+        dx.rectangle([0, 0, W, H], fill=(0, 0, 0, int(255 * dip ** 1.5)))
+    return Image.alpha_composite(out, fx)
+
+
+for f in sorted(FR):
+    p = os.path.join(d, f"{f:04d}.png")
+    if not os.path.exists(p):
+        continue
+    im = Image.open(p).convert("RGBA")
+    draw(im, FR[f]).convert("RGB").save(os.path.join(d, f"o{f:04d}.png") if "--keep" in sys.argv else p)
+print("overlay done", len(FR))
