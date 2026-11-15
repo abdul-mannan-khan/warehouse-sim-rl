@@ -7,7 +7,9 @@ The SimPy event trace drives everything. For each frame we compute where every o
 cycle (waiting, robot driving out, queueing at the picker, being picked, driving back) and place NVIDIA's
 iw.hub robots along aisle routes in the `full_warehouse` environment. The four picking zones of the model are
 mapped to four rack aisles and the depot to a packing area on the open floor. Pickers and packers are
-NVIDIA's animated characters; a picker plays a picking gesture while the simulator says a pick is in progress.
+NVIDIA's characters. While the simulator says a pick is in progress, the picker turns to the rack, takes a
+carton off the shelf and places it in the robot's tote (pose.py: spine bend, squat and arm IK on top of a
+retargeted idle clip); packers move items from the incoming bin into a shipping box while totes wait to be packed.
 
 The video is cut into five shots (establishing crane, a camera following one robot, a picker's aisle, the
 packing area, and an overview of the rest of the shift). Each shot covers a different stretch of the shift at
@@ -28,6 +30,8 @@ ap.add_argument("--subframes", type=int, default=12)
 ap.add_argument("--preview", action="store_true", help="render one frame from the middle of each shot")
 ap.add_argument("--start", type=int, default=0)
 ap.add_argument("--end", type=int, default=-1)
+ap.add_argument("--hud-only", action="store_true", help="write hud.json for the frames without rendering")
+ap.add_argument("--frames", default="", help="comma-separated frame numbers to render (for checks)")
 args = ap.parse_args()
 W, H = map(int, args.res.split("x"))
 
@@ -55,8 +59,7 @@ PEOPLE = [f"{ROOT}/Isaac/People/Characters/{c}/{c}.usd" for c in
           ("male_adult_construction_05_new", "male_adult_construction_01_new", "male_adult_construction_03",
            "female_adult_police_03_new")]
 ANIM = {"idle": (f"{ROOT}/Isaac/People/Animations/stand_idle_loop.skelanim.usd", None),
-        "pick": (f"{ROOT}/Isaac/People/Animations/type_keyboard.skelanim.usd", None),       # bends to the tote
-        "pack": (f"{ROOT}/Isaac/People/MotionLibrary/BuiltinActions/MoveCarryObject/CarryObjectIdleBothHands.usd", 24.0)}
+        "walk": (f"{ROOT}/Isaac/People/Animations/stand_walk_loop_in_place.skelanim.usd", None)}
 
 T = json.load(open(args.trace))
 ORDERS = sorted(T["orders"], key=lambda o: o["created"])
@@ -68,7 +71,10 @@ SHIFT = T["minutes"]
 AISLE_X = [-22.85, -17.9, -12.95, -8.0, -3.0, 1.95]
 ZONE_AISLE = [AISLE_X[3], AISLE_X[2], AISLE_X[1], AISLE_X[0]]      # the four clear aisles; zone 1 nearest
 ZONE_PICK_Y = [12.5, 15.5, 18.5, 21.5]
-LANE = 0.6                       # out lane on the +x side of an aisle, return lane on the -x side
+LANE = 0.85                      # out lane on the +x side of an aisle, return lane on the -x side
+RACK_FACE = 1.925                 # pick face of the rack on the +x side of each aisle (from the scene bounds)
+SHELF_Z = 1.30                    # first shelf level above the floor pallets
+PICKER_DX = 1.50                  # picker stands between the robot stop and the rack face
 CROSS_OUT, CROSS_BACK = 5.4, 6.8  # two-lane cross aisle in front of the racks
 DOCK_Y = -3.5
 DOCK_X = [-14.5 + 1.9 * r for r in range(T["n_robots"])]
@@ -139,7 +145,7 @@ def slot(o, t):
 def state_at(t):
     waiting = [[] for _ in range(NZ)]
     robots = {}
-    picking = [False] * NZ
+    picking = [None] * NZ
     done = late = 0
     ct_sum = 0.0
     for o in ORDERS:
@@ -175,14 +181,17 @@ def state_at(t):
             pos = np.array([ZONE_AISLE[z] + LANE, ZONE_PICK_Y[z] - QUEUE_GAP * k])
             heading = math.pi / 2
             phase = "pick" if (o["pick_start"] is not None and t >= o["pick_start"] and k < 0.05) else "queue"
-            picking[z] |= phase == "pick"
+            if phase == "pick":
+                picking[z] = o
         else:
             back = o["back"] if o["back"] is not None else o["pick_end"] + (o["at_zone"] - o["dispatched"])
             f = (t - o["pick_end"]) / max(back - o["pick_end"], 1e-9)
             pos, heading = o["P_back"].pose(o["P_back"].L * ease(f))
             phase = "back"
-        robots[o["robot"]] = (pos, heading, phase, o["rush"], z)
-    return dict(waiting=waiting, robots=robots, picking=picking, done=done, late=late,
+        robots[o["robot"]] = (pos, heading, phase, o["rush"], z, o)
+    packing = sum(1 for o in ORDERS if o["back"] is not None and o["back"] <= t
+                  and (o["done"] is None or o["done"] > t))
+    return dict(waiting=waiting, robots=robots, picking=picking, packing=packing, done=done, late=late,
                 ct=(ct_sum / done if done else 0.0))
 
 
@@ -209,9 +218,19 @@ follow = next(o for o in ORDERS if o["dispatched"] is not None and o["dispatched
               and o["back"] is not None)
 fs = follow["dispatched"] - 0.04
 SHOTS.append(("follow", 14.0, fs, fs + 14.0 * 10 / 60, {"robot": follow["robot"], "order": follow}))
-AISLE_ZONE = 1
-a0 = busiest(SHOTS[-1][3] + 1, 2.0, lambda a, b: sum(1 for o in ORDERS if o["zone"] == AISLE_ZONE and o["pick_start"]
-                                                     and a + 0.3 < o["pick_start"] < b - 0.3), t_to=200)
+
+
+def aisle_score(z, a, b):
+    """Share of the window with a pick long enough to show the full shelf-to-tote motion, plus arrivals."""
+    cover = sum(max(0.0, min(o["pick_end"], b) - max(o["pick_start"], a)) for o in ORDERS
+                if o["zone"] == z and o["pick_start"] is not None and o["pick_end"] is not None
+                and (o["pick_end"] - o["pick_start"]) * 5.0 >= 4.2)
+    arrivals = sum(1 for o in ORDERS if o["zone"] == z and o.get("at_zone") is not None and a < o["at_zone"] < b)
+    return cover / (b - a) + 0.15 * min(arrivals, 3)
+
+
+AISLE_ZONE, a0 = max(((z, busiest(SHOTS[-1][3] + 1, 2.0, lambda a, b, z=z: aisle_score(z, a, b), step=0.1, t_to=200))
+                      for z in range(NZ)), key=lambda zt: aisle_score(zt[0], zt[1], zt[1] + 2.0))
 SHOTS.append(("aisle", 10.0, a0, a0 + 2.0, {"zone": AISLE_ZONE}))
 d0 = busiest(SHOTS[-1][3] + 1, 1.8, lambda a, b: sum(1 for o in ORDERS if o["back"] and a + 0.2 < o["back"] < b)
              + sum(1 for o in ORDERS if o["dispatched"] and a + 0.2 < o["dispatched"] < b), t_to=260)
@@ -346,29 +365,74 @@ for r, x in enumerate(DOCK_X):                                       # charging 
     strip(f"/World/lanes/dock{r}b", (x - 0.55, DOCK_Y + 0.75), (x + 0.55, DOCK_Y + 0.75), 0.06, M["dock"])
 
 # packing area: benches south of the docks with packers, pallets of outbound boxes, a parked forklift
-PACK_Y = DOCK_Y - 3.0
-packers = []
-for i, x in enumerate((DOCK_X[0] + 0.9, (DOCK_X[0] + DOCK_X[-1]) / 2, DOCK_X[-1] - 0.9)):
+PACK_Y = DOCK_Y - 2.8
+TABLE_X = [DOCK_X[0] + 0.9, (DOCK_X[0] + DOCK_X[-1]) / 2, DOCK_X[-1] - 0.9]
+for i, x in enumerate(TABLE_X):
     reference(f"/World/pack/table{i}", A_TABLE, (x, PACK_Y, 0.0), 0.0)
-    packers.append((f"/World/pack/packer{i}", (x, PACK_Y - 1.1), 90.0))     # facing the docks
 for i, (x, y) in enumerate([(-23.0, -5.0), (-23.0, -7.2), (-21.0, -5.0), (-21.0, -7.5), (-1.5, -9.0), (0.5, -9.0)]):
     reference(f"/World/pal/p{i}", A_PALLET, (x, y, 0.0), 90.0 * (i % 2))
     for j in range(3 if i % 3 else 2):
         reference(f"/World/pal/p{i}b{j}", A_BOX, (x - 0.3 + 0.6 * (j % 2), y + 0.25 - 0.5 * (j // 2), 0.16), 0.0)
 reference("/World/forklift", A_FORKLIFT, (-22.5, -11.5, 0.0), 35.0)
 
-# pickers: one per zone, standing at the pick face beside the robot stop
-pickers = [(f"/World/picker{z}", (ZONE_AISLE[z] + 1.2, ZONE_PICK_Y[z] + 0.1), 180.0) for z in range(NZ)]
-CHARS, CHAR_URL = [], []
-for k, (path, (x, y), heading) in enumerate(pickers + packers):
-    reference(path, PEOPLE[k % len(PEOPLE)], (x, y, 0.0), heading + 90.0)   # characters face -y by default
+# pickers: one per zone, standing between the robot stop and the rack face
+CHARS, CHAR_URL, CHAR_OPS = [], [], []
+for z in range(NZ):
+    path, url = f"/World/picker{z}", PEOPLE[z % len(PEOPLE)]
+    CHAR_OPS.append(reference(path, url, (ZONE_AISLE[z] + PICKER_DX, ZONE_PICK_Y[z], 0.0), 0.0))
     CHARS.append(path)
-    CHAR_URL.append(PEOPLE[k % len(PEOPLE)])
+    CHAR_URL.append(url)
+
+M["card"] = material("card", (0.60, 0.43, 0.25), rough=0.85)
+M["tape"] = material("tape", (0.80, 0.68, 0.45), rough=0.4)
+M["bin"] = material("bin", (0.25, 0.42, 0.62), rough=0.5)
+CART = (0.17, 0.21, 0.14)                         # parcel: depth, width, height (m)
+
+
+def carton(path, size=CART):
+    x, t_, r_ = xform(path)
+    b = UsdGeom.Cube.Define(stage, path + "/box")
+    b.CreateSizeAttr(1.0)
+    b.AddScaleOp().Set(Gf.Vec3f(*size))
+    bind(b.GetPrim(), M["card"])
+    tp = UsdGeom.Cube.Define(stage, path + "/tape")
+    tp.CreateSizeAttr(1.0)
+    tp.AddTranslateOp().Set(Gf.Vec3d(0, 0, size[2] / 2))
+    tp.AddScaleOp().Set(Gf.Vec3f(size[0] + 0.004, 0.05, 0.006))
+    bind(tp.GetPrim(), M["tape"])
+    return {"prim": x.GetPrim(), "t": t_, "r": r_}
+
+
+def show(prim, on):
+    im = UsdGeom.Imageable(prim)
+    im.MakeVisible() if on else im.MakeInvisible()
+
+
+def open_box(path, c, size=(0.40, 0.34, 0.24), wall=0.012):
+    """Open shipping carton on the packing table; parcels are lowered into it."""
+    sx, sy, sz = size
+    parts = [((0, 0, wall / 2), (sx, sy, wall)),
+             ((sx / 2, 0, sz / 2), (wall, sy, sz)), ((-sx / 2, 0, sz / 2), (wall, sy, sz)),
+             ((0, sy / 2, sz / 2), (sx, wall, sz)), ((0, -sy / 2, sz / 2), (sx, wall, sz)),
+             ((sx / 2 + 0.09, 0, sz + 0.04), (0.18, sy, wall))]                  # one flap folded out
+    xform(path, c)
+    for k, (o, sc) in enumerate(parts):
+        q = UsdGeom.Cube.Define(stage, f"{path}/w{k}")
+        q.CreateSizeAttr(1.0)
+        q.AddTranslateOp().Set(Gf.Vec3d(*o))
+        if k == 5:
+            q.AddRotateYOp().Set(-35.0)
+        q.AddScaleOp().Set(Gf.Vec3f(*sc))
+        bind(q.GetPrim(), M["card"])
+
+
+# one carton per worker (on the shelf / in the hands); three parcel slots in every robot's tote
+HAND = [carton(f"/World/parcels/w{k}") for k in range(NZ + 3)]
 
 robots = []
 for r in range(T["n_robots"]):
     x, tr, rot = reference(f"/World/robot{r}", A_ROBOT, (DOCK_X[r], DOCK_Y, 0.0), -90.0 + YAW_OFF)
-    robots.append({"x": x, "t": tr, "r": rot})
+    robots.append({"x": x, "t": tr, "r": rot, "items": [carton(f"/World/robot{r}/item{k}") for k in range(3)]})
 
 # lights: keep the warehouse's own ceiling lights, add sky and a soft sun through the open roof
 dome = UsdLux.DomeLight.Define(stage, "/World/sky")
@@ -385,9 +449,36 @@ for _ in range(120):                          # stream referenced assets before 
 
 for i in range(3):
     fit(f"/World/pack/table{i}", 2.0)
+    g = bbox(stage.GetPrimAtPath(f"/World/pack/table{i}/asset")).GetSize()
+    if g[1] > g[0]:                                         # long side along x, facing the docks
+        UsdGeom.Xformable(stage.GetPrimAtPath(f"/World/pack/table{i}")).GetOrderedXformOps()[1].Set(90.0)
 for p in stage.GetPrimAtPath("/World/pal").GetChildren():
     fit(str(p.GetPath()), 1.2 if "b" not in p.GetName() else 0.5)
 fit("/World/forklift", 3.2)
+
+# packing stations: an incoming bin and an open shipping box on each table, the packer in front of it
+for _ in range(10):
+    app.update()
+tb = bbox(stage.GetPrimAtPath("/World/pack/table0/asset"))
+TABLE_TOP, TABLE_FRONT = float(tb.GetMax()[2]), float(tb.GetMin()[1]) - PACK_Y
+print("table", tb.GetSize(), "top", TABLE_TOP, "front", TABLE_FRONT, flush=True)
+STATIONS = []
+for i, x in enumerate(TABLE_X):
+    fy = PACK_Y + TABLE_FRONT
+    sup = np.array([x - 0.55, fy + 0.30, TABLE_TOP + 0.09])
+    box = np.array([x + 0.20, fy + 0.30, TABLE_TOP + 0.10])
+    reference(f"/World/pack/bin{i}", A_TOTE, (sup[0], sup[1], TABLE_TOP + 0.005), 0.0)
+    open_box(f"/World/pack/ship{i}", (box[0], box[1], TABLE_TOP + 0.003))
+    path, url = f"/World/pack/packer{i}", PEOPLE[(NZ + i) % len(PEOPLE)]
+    CHAR_OPS.append(reference(path, url, (x - 0.15, fy - 0.36, 0.0), 0.0))
+    CHARS.append(path)
+    CHAR_URL.append(url)
+    STATIONS.append((sup, box))
+for _ in range(60):
+    app.update()
+for i in range(3):
+    fit(f"/World/pack/bin{i}", 0.42)
+    bind(stage.GetPrimAtPath(f"/World/pack/bin{i}"), M["bin"])
 for c in CHARS:
     fit(c, 1.76, axis="z")
 rb = bbox(stage.GetPrimAtPath("/World/robot0/asset"))
@@ -400,48 +491,229 @@ for r, rbt in enumerate(robots):
     tote_geo = stage.GetPrimAtPath(path)
     bind(tote_geo, M["idle"])
     rbt["tote"] = tote_geo
+tg = bbox(robots[0]["tote"])
+print("tote bbox", tg.GetMin(), tg.GetMax(), flush=True)
+ITEM_Z = ROBOT_TOP + 0.045 + CART[2] / 2
+SLOTS = [(-0.09, 0.0, 0.0), (0.09, 0.0, 0.0), (0.0, 0.0, CART[2])]
+for rbt in robots:
+    for k, it in enumerate(rbt["items"]):
+        it["t"].Set(Gf.Vec3d(SLOTS[k][0], SLOTS[k][1], ITEM_Z + SLOTS[k][2]))
+        it["r"].Set(0.0)
+        show(it["prim"], False)
+
+
+def robot_point(pos, heading, off):
+    """A point given in a robot's local frame (as its tote slots are), in world coordinates."""
+    a = heading + math.radians(YAW_OFF)
+    c, s_ = math.cos(a), math.sin(a)
+    return np.array([pos[0] + c * off[0] - s_ * off[1], pos[1] + s_ * off[0] + c * off[1], off[2]])
 
 
 # ------------------------------------------------------------------ character animation
 # NVIDIA's clips target the biped rig; the characters use a Reallusion rig, so retarget them (retarget.py).
+# There is no pick or place clip, so work motions are posed procedurally on the idle clip (pose.py).
 import sys                                             # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from retarget import Retargeter                        # noqa: E402
+from pose import Poser, smooth as sm                   # noqa: E402
 
 BIPED = f"{ROOT}/Isaac/People/Characters/Biped_Setup.usd"
-RT, CLIPS, ANIMS = {}, {}, []
+RT, CLIPS, WORKERS = {}, {}, []
+xcache = UsdGeom.XformCache()
 for i, c in enumerate(CHARS):
-    skel = next((p for p in Usd.PrimRange(stage.GetPrimAtPath(c)) if p.IsA(UsdSkel.Skeleton)), None)
+    skel = next(p for p in Usd.PrimRange(stage.GetPrimAtPath(c)) if p.IsA(UsdSkel.Skeleton))
     url = CHAR_URL[i]
-    if skel is None:
-        ANIMS.append(None)
-        continue
-    try:
-        if url not in RT:
-            RT[url] = Retargeter(BIPED, skel)
-            for k, (clip_url, max_s) in ANIM.items():
-                CLIPS[(url, k)] = RT[url].clip(clip_url, FPS, max_s)
-            print("retargeted", url.rsplit("/", 1)[-1], len(RT[url].tmap), "joints", flush=True)
-    except Exception as e:                     # noqa: BLE001
-        print("animation unavailable for", url, e, flush=True)
-        ANIMS.append(None)
-        continue
+    if url not in RT:
+        RT[url] = Retargeter(BIPED, skel)
+        for k, (clip_url, max_s) in ANIM.items():
+            CLIPS[(url, k)] = RT[url].clip_mats(clip_url, FPS, max_s)
+        print("retargeted", url.rsplit("/", 1)[-1], len(RT[url].tmap), "joints", flush=True)
     r = RT[url]
     a = UsdSkel.Animation.Define(stage, f"/World/anim/a{i}")
     a.GetJointsAttr().Set(r.tjoints)
     a.GetTranslationsAttr().Set(r.t_trans)
     a.GetScalesAttr().Set(r.t_scale)
     UsdSkel.BindingAPI.Apply(skel).CreateAnimationSourceRel().SetTargets([a.GetPath()])
-    ANIMS.append({"a": a, "url": url, "phase": int(FPS * 1.37 * i)})
-print("animated characters:", sum(a is not None for a in ANIMS), flush=True)
+    _, t_op, r_op = CHAR_OPS[i]
+    xcache.Clear()
+    skel_to_root = xcache.GetLocalToWorldTransform(skel) * xcache.GetLocalToWorldTransform(
+        stage.GetPrimAtPath(c)).GetInverse()
+    ps = Poser(r, skel_to_root)
+    root = t_op.Get()
+    WORKERS.append({"a": a, "url": url, "poser": ps, "t": t_op, "r": r_op, "xy": np.array([root[0], root[1]]),
+                    "z0": float(root[2]), "fwd": math.atan2(ps.fwd_r[1], ps.fwd_r[0]), "phase": int(FPS * 1.37 * i),
+                    "carton": HAND[i]})
+    print("worker", c, "body forward in root frame", np.round(ps.fwd_r, 3), "arm", round(ps.arm_len, 3), flush=True)
+
+# a work cycle: turn to the pick point A, reach, grip, lift, turn to the place point B, lower, release, step back
+PHASES = [("turnA", 0.00, 0.15), ("reach", 0.15, 0.29), ("grip", 0.29, 0.34), ("lift", 0.34, 0.44),
+          ("turnB", 0.44, 0.60), ("lower", 0.60, 0.73), ("release", 0.73, 0.78), ("ret", 0.78, 0.89),
+          ("rest", 0.89, 1.0)]
+CARRY = np.array([0.30, 0.0, 1.02])                # parcel held in front of the chest (body frame)
 
 
-def animate(i, clip_name, sec):
-    A = ANIMS[i]
-    if A is None:
-        return
-    frames = CLIPS[(A["url"], clip_name)]
-    A["a"].GetRotationsAttr().Set(frames[(int(sec * FPS) + A["phase"]) % len(frames)])
+def wrists(c):
+    """Wrist targets that hold a parcel centred at body-frame point c."""
+    hw = CART[1] / 2 + 0.035
+    return {"L": (c[0] - 0.05, c[1] + hw, c[2]), "R": (c[0] - 0.05, c[1] - hw, c[2])}
+
+
+def to_body(W, p, psi):
+    d = np.asarray(p[:2]) - W["xy"]
+    return np.array([d[0] * math.cos(psi) + d[1] * math.sin(psi),
+                     -d[0] * math.sin(psi) + d[1] * math.cos(psi), p[2] - W["z0"]])
+
+
+def to_world(W, b, psi):
+    return np.array([W["xy"][0] + b[0] * math.cos(psi) - b[1] * math.sin(psi),
+                     W["xy"][1] + b[0] * math.sin(psi) + b[1] * math.cos(psi), b[2] + W["z0"]])
+
+
+def heading_to(W, p):
+    d = np.asarray(p[:2]) - W["xy"]
+    return math.atan2(d[1], d[0])
+
+
+def work(W, u, A, B, turn_sign=0):
+    """Pose for fraction u of a work cycle moving a parcel from A to B (world points).
+    Returns facing, posture, hand target, leg blend, where the parcel is and whether it has been placed."""
+    psiB = heading_to(W, B)
+    dA = heading_to(W, A) - psiB
+    dA = (dA + math.pi) % (2 * math.pi) - math.pi
+    if turn_sign and dA * turn_sign < 0:
+        dA += 2 * math.pi * turn_sign
+    psiA = psiB + dA
+    bA, bB = to_body(W, A, psiA), to_body(W, B, psiB)
+    pA, pB = W["poser"].solve(wrists(bA)), W["poser"].solve(wrists(bB))
+    name, k = "rest", 0.0
+    for n, a0, a1 in PHASES:
+        if a0 <= u < a1:
+            name, k = n, (u - a0) / (a1 - a0)
+            break
+    s = sm(k)
+    z = (0.0, 0.0)
+
+    def lerp2(p, q, f_):
+        return (p[0] + (q[0] - p[0]) * f_, p[1] + (q[1] - p[1]) * f_)
+
+    leg = 1.0 if abs(dA) > 1.0 else 0.5
+    out = {"psi": psiB, "post": z, "tgt": None, "w": 0.0, "legs": 0.0, "parcel": "A", "placed": False}
+    if name == "turnA":
+        out.update(psi=psiB + dA * s, legs=math.sin(math.pi * k) * leg)
+    elif name == "reach":
+        out.update(psi=psiA, post=lerp2(z, pA, s), tgt=bA, w=s)
+    elif name == "grip":
+        out.update(psi=psiA, post=pA, tgt=bA, w=1.0, parcel="A" if k < 0.5 else "hands")
+    elif name == "lift":
+        out.update(psi=psiA, post=lerp2(pA, z, s), tgt=bA + (CARRY - bA) * s, w=1.0, parcel="hands")
+    elif name == "turnB":
+        out.update(psi=psiA - dA * s, tgt=CARRY, w=1.0, parcel="hands", legs=math.sin(math.pi * k) * leg)
+    elif name == "lower":
+        out.update(post=lerp2(z, pB, s), tgt=CARRY + (bB - CARRY) * s, w=1.0, parcel="hands")
+    elif name == "release":
+        out.update(post=pB, tgt=bB, w=1.0, parcel="hands" if k < 0.5 else None, placed=k >= 0.5)
+    elif name == "ret":
+        out.update(post=lerp2(pB, z, s), tgt=bB, w=1.0 - s, parcel=None, placed=True)
+    else:
+        out.update(parcel=None, placed=True)
+    return out
+
+
+def drive(W, sec, m=None, idle_psi=0.0):
+    """Apply a work pose (or idle, when m is None) to a worker's skeleton, root and parcel."""
+    frames = CLIPS[(W["url"], "idle")]
+    base = frames[(int(sec * FPS) + W["phase"]) % len(frames)]
+    walk = CLIPS[(W["url"], "walk")]
+    ps = W["poser"]
+    if m is None:
+        L, Tr = ps.pose(base)
+        psi = idle_psi
+    else:
+        psi = m["psi"]
+        hands = None
+        if m["tgt"] is not None:
+            hands = {sd: (np.array(p), m["w"]) for sd, p in wrists(m["tgt"]).items()}
+        L, Tr = ps.pose(base, m["post"][0], hands, walk[int(sec * FPS * 1.3) % len(walk)], m["legs"],
+                        squat=m["post"][1])
+    W["a"].GetRotationsAttr().Set(Poser.quats(L))
+    W["a"].GetTranslationsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(*map(float, t)) for t in Tr]))
+    W["r"].Set(math.degrees(psi - W["fwd"]))
+    pc = W["carton"]
+    where = None if m is None else m["parcel"]
+    p, yaw = None, psi
+    if where == "A":
+        p, yaw = m["A"], m.get("A_yaw", psi)
+    elif where == "hands":
+        p = to_world(W, ps.hand_mid(L, Tr), psi)
+    show(pc["prim"], p is not None)
+    if p is not None:
+        pc["t"].Set(Gf.Vec3d(*map(float, p)))
+        pc["r"].Set(math.degrees(yaw))
+
+
+def pick_cycles(o, rate):
+    """Shelf-to-tote cycles shown for an order's pick at this time-lapse rate (0: too fast to show)."""
+    end = o["pick_end"] if o["pick_end"] is not None else SHIFT          # still being picked at the end of the shift
+    pv = (end - o["pick_start"]) * 60.0 / rate
+    if pv < 2.4:
+        return 0
+    return max(1, int(pv / 4.2))
+
+
+def shelf_point(z, k):
+    dy = (-0.32, 0.18, 0.38, -0.08)[k % 4]
+    return np.array([ZONE_AISLE[z] + RACK_FACE + 0.03, ZONE_PICK_Y[z] + dy, SHELF_Z + CART[2] / 2 + 0.005])
+
+
+PACK_T = 4.6                                       # seconds per packing cycle
+SHOT_START = {}
+for _f, _p in enumerate(PLAN):
+    SHOT_START.setdefault(_p[0], _f)
+
+
+def animate_workers(f, st, rate):
+    """Pose pickers and packers for frame f; returns the number of parcels in each robot's tote."""
+    sec = f / FPS
+    items = {}
+    for r, (pos, heading, phase, rush, z, o) in st["robots"].items():
+        if phase == "back":
+            items[r] = min(max(pick_cycles(o, rate), 1), 3)
+    for z in range(NZ):
+        W = WORKERS[z]
+        o = st["picking"][z]
+        psi_idle = math.pi                                  # facing the aisle and the robot stop
+        if o is None:
+            drive(W, sec, None, psi_idle)
+            continue
+        pos, heading = st["robots"][o["robot"]][:2]
+        n = pick_cycles(o, rate)
+        end = o["pick_end"] if o["pick_end"] is not None else SHIFT
+        frac = (PLAN[f][1] - o["pick_start"]) / max(end - o["pick_start"], 1e-9)
+        if n == 0:
+            items[o["robot"]] = 1 if frac > 0.5 else 0
+            drive(W, sec, None, psi_idle)
+            continue
+        c = min(max(frac, 0.0) * n, n - 1e-6)
+        idx, u = int(c), c - int(c)
+        slot = SLOTS[min(idx, 2)]
+        A = shelf_point(z, idx)
+        B = robot_point(pos, heading, (slot[0], slot[1], ITEM_Z + slot[2] + 0.01))
+        m = work(W, u, A, B, turn_sign=-1)                 # turn through the up-aisle side
+        m["A"], m["A_yaw"] = A, 0.0
+        items[o["robot"]] = min(idx + (1 if m["placed"] else 0), 3)
+        drive(W, sec, m, psi_idle)
+    for i, (sup, box) in enumerate(STATIONS):
+        W = WORKERS[NZ + i]
+        cyc = (sec + 1.3 * i) / PACK_T
+        u = cyc - int(cyc)
+        f0 = max(f - int(u * PACK_T * FPS), SHOT_START[PLAN[f][0]])
+        if rate < 30 and state_at(PLAN[f0][1])["packing"] > i:
+            m = work(W, u, sup, box)
+            m["A"], m["A_yaw"] = sup, 0.0
+            drive(W, sec, m)
+        else:
+            drive(W, sec, None, heading_to(W, box))
+    return items
 
 
 # ------------------------------------------------------------------ camera
@@ -506,12 +778,13 @@ def camera_for(f):
         z = ex["zone"]
         ax, py = ZONE_AISLE[z], ZONE_PICK_Y[z]
         k = smooth(u)
-        eye = lerp((ax - 1.4, py + 4.5, 2.1), (ax - 1.0, py + 3.3, 1.8), k)
-        return eye, (ax + 0.6, py - 5.0, 0.7), 16.0
+        eye = lerp((ax - 1.3, py + 3.9, 2.2), (ax - 1.0, py + 3.0, 1.9), k)
+        return eye, (ax + 1.0, py - 1.2, 0.85), 18.0
     if name == "depot":
         k = smooth(u)
-        eye = lerp((DOCK_X[-1] + 6.0, DOCK_Y + 7.0, 4.5), (DOCK_X[-1] + 3.5, DOCK_Y + 8.0, 4.2), k)
-        return eye, ((DOCK_X[0] + DOCK_X[-1]) / 2 + 1.0, DOCK_Y - 1.5, 0.5), 18.0
+        mid = (DOCK_X[0] + DOCK_X[-1]) / 2
+        eye = lerp((mid + 3.0, PACK_Y - 7.6, 4.3), (mid + 0.8, PACK_Y - 8.0, 4.0), k)
+        return eye, (mid - 0.3, PACK_Y + 1.6, 0.4), 18.0
     k = smooth(u)                                                # overview
     eye = lerp((CENTER_X + 9.0, -27.0, 27.0), (CENTER_X - 7.0, -27.0, 27.0), k)
     return eye, (CENTER_X, 8.0, 0.0), 18.0
@@ -544,7 +817,7 @@ def apply(f):
     st = state_at(t_)
     for r, R in enumerate(robots):
         if r in st["robots"]:
-            pos, heading, phase, rush, z = st["robots"][r]
+            pos, heading, phase, rush, z, _ = st["robots"][r]
             R["t"].Set(Gf.Vec3d(float(pos[0]), float(pos[1]), 0.0))
             R["r"].Set(math.degrees(heading) + YAW_OFF)
             bind(R["tote"], M["pick"] if phase == "pick" else (M["rush"] if rush else M["normal"]))
@@ -552,23 +825,20 @@ def apply(f):
             R["t"].Set(Gf.Vec3d(DOCK_X[r], DOCK_Y, 0.0))
             R["r"].Set(-90.0 + YAW_OFF)
             bind(R["tote"], M["idle"])
-    sec = f / FPS
-    docked = sum(1 for r in range(len(robots)) if r not in st["robots"])
-    for i in range(len(CHARS)):
-        if i < NZ:
-            animate(i, "pick" if st["picking"][i] else "idle", sec)
-        else:
-            animate(i, "pack" if docked else "idle", sec)
-    eye, tgt, focal = camera_for(f)
-    view = set_camera(eye, tgt, focal)
     name = SHOTS[si][0]
     rate = (SHOTS[si][3] - SHOTS[si][2]) * 60.0 / SHOTS[si][1]
+    items = animate_workers(f, st, rate)
+    for r, R in enumerate(robots):
+        for k, it in enumerate(R["items"]):
+            show(it["prim"], k < items.get(r, 0))
+    eye, tgt, focal = camera_for(f)
+    view = set_camera(eye, tgt, focal)
     labels = {}
     if name in ("establish", "overview"):
         labels = {f"Zone {z + 1}": project(view, focal, (ZONE_AISLE[z], 9.0, 6.6)) for z in range(NZ)}
         labels["Packing + docks"] = project(view, focal, ((DOCK_X[0] + DOCK_X[-1]) / 2, PACK_Y - 2.2, 0.0))
     elif name == "aisle":
-        labels = {f"Zone {ex_z + 1} picker": project(view, focal, (ZONE_AISLE[ex_z] + 1.2, ZONE_PICK_Y[ex_z], 2.1))
+        labels = {f"Zone {ex_z + 1} picker": project(view, focal, (ZONE_AISLE[ex_z] + PICKER_DX, ZONE_PICK_Y[ex_z], 2.1))
                   for ex_z in [SHOTS[si][4]["zone"]]}
     elif name == "follow":
         rid = SHOTS[si][4]["robot"]
@@ -581,8 +851,8 @@ def apply(f):
                                                                    "rush" if ex["order"]["rush"] else "normal")
     else:
         caption = {"establish": "NVIDIA warehouse digital twin: 4 picking zones, packing area, 6 iw.hub robots",
-                   "aisle": f"Zone {ex.get('zone', 0) + 1}: robots queue for the picker",
-                   "depot": "Packing area: robots return totes and wait at their docks",
+                   "aisle": f"Zone {ex.get('zone', 0) + 1}: the picker loads each robot's tote while the next ones queue",
+                   "depot": "Packing area: picked items are packed for shipping; idle robots wait at their docks",
                    "overview": "Rest of the shift"}[name]
     return {"frame": f, "shot": name, "u": u, "t": t_, "rate": rate, "caption": caption, "done": st["done"],
             "late": st["late"], "ct": st["ct"], "waiting": [len(w) for w in st["waiting"]],
@@ -596,6 +866,8 @@ if args.preview:
     for i in range(len(SHOTS)):
         idx = [f for f, p in enumerate(PLAN) if p[0] == i]
         frames.append(idx[len(idx) // 2])
+elif args.frames:
+    frames = [int(v) for v in args.frames.split(",")]
 else:
     frames = list(range(args.start, len(PLAN) if args.end < 0 else min(args.end, len(PLAN))))
 
@@ -607,6 +879,8 @@ t0 = time.time()
 for k, f in enumerate(frames):
     h = apply(f)
     hud.append(h)
+    if args.hud_only:
+        continue
     rep.orchestrator.step(rt_subframes=args.subframes)
     img = np.asarray(rgb.get_data())
     Image.fromarray(img[..., :3]).save(os.path.join(args.out, f"{f:04d}.png"))
@@ -615,7 +889,7 @@ for k, f in enumerate(frames):
               f"{(time.time() - t0) / (k + 1):.2f} s/frame", flush=True)
 meta = {"W": W, "H": H, "fps": FPS, "policy": T["policy"], "n_robots": T["n_robots"], "nz": NZ,
         "shift": SHIFT, "n_frames": len(PLAN), "shots": [[s[0], s[1], s[2], s[3]] for s in SHOTS]}
-name = "hud_preview.json" if args.preview else f"hud_{args.start:04d}.json"
+name = "hud_preview.json" if (args.preview or args.frames) else f"hud_{args.start:04d}.json"
 json.dump({"meta": meta, "frames": hud}, open(os.path.join(args.out, name), "w"))
 print("DONE", len(frames), "frames", flush=True)
 app.close()

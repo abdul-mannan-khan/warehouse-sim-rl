@@ -90,6 +90,10 @@ class Retargeter:
 
     def clip(self, url, fps=30.0, max_sec=None):
         """Retargeted local rotations (one Vt.QuatfArray per output frame) for a clip, looped at `fps`."""
+        return [Vt.QuatfArray([to_quat(m) for m in L]) for L in self.clip_mats(url, fps, max_sec)]
+
+    def clip_mats(self, url, fps=30.0, max_sec=None):
+        """Retargeted local rotation matrices, shape (frames, joints, 3, 3)."""
         st = Usd.Stage.Open(url)
         an = UsdSkel.Animation(next(p for p in st.Traverse() if p.IsA(UsdSkel.Animation)))
         aj = an.GetJointsAttr().Get()
@@ -98,7 +102,7 @@ class Retargeter:
         ts = an.GetRotationsAttr().GetTimeSamples() or [0.0]
         tcps = st.GetTimeCodesPerSecond() or 30.0
         n_out = max(int(min(len(ts) / tcps, max_sec or 1e9) * fps), 1)
-        out = []
+        out = np.zeros((n_out, len(self.tj), 3, 3))
         for k in range(n_out):
             tc = ts[0] + k / fps * tcps
             rots = an.GetRotationsAttr().Get(tc)
@@ -110,16 +114,12 @@ class Retargeter:
                 if aidx[i] >= 0:
                     g_src[aidx[i]] = gl[i]
             g_t = [None] * len(self.tj)
-            q = []
             for i in range(len(self.tj)):
                 p = self.tpar[i]
                 if i in self.tmap:
                     s = self.tmap[i]
-                    d = g_src[s] @ self.s_rest[s].T
-                    g_t[i] = self.C @ d @ self.C.T @ self.t_rest[i]
+                    g_t[i] = self.C @ (g_src[s] @ self.s_rest[s].T) @ self.C.T @ self.t_rest[i]
                 else:
                     g_t[i] = (g_t[p] if p >= 0 else np.eye(3)) @ self.t_local_rest[i][0]
-                loc = (g_t[p].T if p >= 0 else np.eye(3)) @ g_t[i]
-                q.append(to_quat(loc))
-            out.append(Vt.QuatfArray(q))
+                out[k, i] = (g_t[p].T if p >= 0 else np.eye(3)) @ g_t[i]
         return out

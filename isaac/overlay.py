@@ -107,6 +107,8 @@ def draw(im, h):
     for lab, (x, y) in h["labels"].items():
         tw = dr.textlength(lab, font=F["lab"])
         x0, y0 = x - tw / 2 - S(12), y - S(40)
+        if y0 < S(140) or y > S(930):                  # would overlap the header, clock or lower panels
+            continue
         dr.rounded_rectangle([x0, y0, x0 + tw + S(24), y0 + S(32)], radius=S(8), fill=(10, 13, 18, 200))
         dr.line([x, y0 + S(32), x, y - S(4)], fill=ACCENT, width=max(1, S(2)))
         dr.ellipse([x - S(5), y - S(5), x + S(5), y + S(5)], fill=ACCENT)

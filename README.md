@@ -18,7 +18,7 @@ video: [media/demo.mp4](media/demo.mp4) — regenerate with `python render_video
 
 *Full 60-second video at 1080p: [media/demo_isaac.mp4](media/demo_isaac.mp4) (the preview above runs at 3x speed).*
 
-| Following one robot to its pick zone | A picker loading a robot's tote |
+| Following one robot to its pick zone | A picker loading a robot's tote while the next robots queue |
 |---|---|
 | ![Follow camera](media/isaac_follow.jpg) | ![Pick aisle](media/isaac_aisle.jpg) |
 
@@ -32,10 +32,15 @@ One 8-hour shift under the learned masked-PPO dispatch policy, replayed inside N
   six robot docks on the open floor. Robots (NVIDIA's iw.hub AMR carrying a KLT tote) drive a two-lane route along the
   cross aisle into their zone, queue behind the robot being picked, and return on the opposite lane. Tote colour shows
   the order state: blue normal, red rush, green being picked, grey empty.
-* **Animated people.** NVIDIA's motion clips are authored for a biped rig, but the character models use a Reallusion
-  skeleton, so binding them directly leaves the characters in T-pose. `isaac/retarget.py` retargets the clips by
-  transferring each joint's rotation from its rest pose in skeleton space. A picker plays a picking gesture while
-  the simulator says a pick is in progress.
+* **People doing the actual work.** While the simulator says a pick is in progress, the picker turns to the rack,
+  takes a parcel off the shelf, turns back and lowers it into the robot's tote; the tote fills up item by item and
+  leaves with them. Packers move items from the incoming bin into an open shipping box while totes are waiting to be
+  packed. NVIDIA's motion library has walking and idling clips but no pick or place motion, so `isaac/pose.py` poses
+  the work procedurally on top of a retargeted idle clip: a spine bend and a knee bend chosen per reach (the least
+  effort posture that brings the shoulders within reach), two-bone arm IK onto the parcel, and legs blended from the
+  walk-in-place clip while turning, so feet step instead of sliding. The clips themselves are retargeted from the
+  biped rig to the characters' Reallusion skeleton by `isaac/retarget.py` (each joint's rotation is transferred
+  from its rest pose in skeleton space).
 * **Edited like a product video.** Five shots (establishing crane, a camera following one robot, a picking aisle, the
   packing area, an overview of the rest of the shift), each covering a different stretch of the shift at its own
   time-lapse rate, shown on screen with the clock and live KPIs.
@@ -101,10 +106,11 @@ mlflow ui                          # http://127.0.0.1:5000
   results on held-out shifts, and one nested run per heuristic baseline so they compare side by side in `mlflow ui`.
 * `render_video.py` — side-by-side animation of policies on the same shift (add `--model maskable_ppo_dispatch.zip`
   for a learned-policy panel).
-* `tools/export_trace.py` + `isaac/replay_isaac.py` + `isaac/retarget.py` + `isaac/overlay.py` — export one simulated
-  shift as an event trace and replay it in NVIDIA Isaac Sim: the warehouse digital twin, iw.hub robots on aisle routes,
-  retargeted character animation, a multi-shot camera, and RTX rendering through Replicator, driven frame by frame from
-  the trace, with titles, clock and KPIs drawn on afterwards.
+* `tools/export_trace.py` + `isaac/replay_isaac.py` + `isaac/retarget.py` + `isaac/pose.py` + `isaac/overlay.py` —
+  export one simulated shift as an event trace and replay it in NVIDIA Isaac Sim: the warehouse digital twin, iw.hub
+  robots on aisle routes, pickers and packers handling parcels (retargeted clips plus procedural reach, IK and
+  squat), a multi-shot camera, and RTX rendering through Replicator, driven frame by frame from the trace, with
+  titles, clock and KPIs drawn on afterwards.
 
 ## Results (default configuration, 1.8 orders/minute, 20 held-out shifts)
 
