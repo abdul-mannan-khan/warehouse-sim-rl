@@ -483,7 +483,12 @@ for c in CHARS:
     fit(c, 1.76, axis="z")
 rb = bbox(stage.GetPrimAtPath("/World/robot0/asset"))
 print("robot bbox", rb.GetSize(), rb.GetMin(), rb.GetMax(), flush=True)
-ROBOT_TOP = float(rb.GetMax()[2]) if rb.GetSize()[0] > 0 else 0.35
+# the asset origin is at the wheel axles, not the floor: lift the robots so the wheels sit on the floor
+ROBOT_Z = max(0.0, -float(rb.GetMin()[2])) if rb.GetSize()[0] > 0 else 0.0
+ROBOT_TOP = float(rb.GetMax()[2]) if rb.GetSize()[0] > 0 else 0.35     # in the robot frame
+for r, rbt in enumerate(robots):
+    rbt["t"].Set(Gf.Vec3d(DOCK_X[r], DOCK_Y, ROBOT_Z))
+print("robot lift", ROBOT_Z, flush=True)
 for r, rbt in enumerate(robots):
     path = f"/World/robot{r}/tote"
     reference(path, A_TOTE, (0.0, 0.0, ROBOT_TOP + 0.01), 90.0 - YAW_OFF)
@@ -506,7 +511,7 @@ def robot_point(pos, heading, off):
     """A point given in a robot's local frame (as its tote slots are), in world coordinates."""
     a = heading + math.radians(YAW_OFF)
     c, s_ = math.cos(a), math.sin(a)
-    return np.array([pos[0] + c * off[0] - s_ * off[1], pos[1] + s_ * off[0] + c * off[1], off[2]])
+    return np.array([pos[0] + c * off[0] - s_ * off[1], pos[1] + s_ * off[0] + c * off[1], off[2] + ROBOT_Z])
 
 
 # ------------------------------------------------------------------ character animation
@@ -818,11 +823,11 @@ def apply(f):
     for r, R in enumerate(robots):
         if r in st["robots"]:
             pos, heading, phase, rush, z, _ = st["robots"][r]
-            R["t"].Set(Gf.Vec3d(float(pos[0]), float(pos[1]), 0.0))
+            R["t"].Set(Gf.Vec3d(float(pos[0]), float(pos[1]), ROBOT_Z))
             R["r"].Set(math.degrees(heading) + YAW_OFF)
             bind(R["tote"], M["pick"] if phase == "pick" else (M["rush"] if rush else M["normal"]))
         else:
-            R["t"].Set(Gf.Vec3d(DOCK_X[r], DOCK_Y, 0.0))
+            R["t"].Set(Gf.Vec3d(DOCK_X[r], DOCK_Y, ROBOT_Z))
             R["r"].Set(-90.0 + YAW_OFF)
             bind(R["tote"], M["idle"])
     name = SHOTS[si][0]

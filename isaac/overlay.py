@@ -64,10 +64,13 @@ def draw(im, h):
     dr = ImageDraw.Draw(ov)
     f = h["frame"]
     # header
-    panel(dr, (28, 24, 820, 108))
+    t1 = "Warehouse picking simulation  \u2022  NVIDIA Isaac Sim replay"
+    t2 = f"SimPy discrete-event model  \u2022  dispatch policy: {META['policy']}"
+    hw = max(dr.textlength(t1, font=F["title"]), dr.textlength(t2, font=F["sub"])) / s
+    panel(dr, (28, 24, 52 + hw + 28, 108))                # sized to the text
     dr.rectangle([S(28), S(24), S(34), S(108)], fill=ACCENT)
-    text(dr, (52, 36), "Warehouse picking simulation  \u2022  NVIDIA Isaac Sim replay", F["title"])
-    text(dr, (52, 74), f"SimPy discrete-event model  \u2022  dispatch policy: {META['policy']}", F["sub"], GREY)
+    text(dr, (52, 36), t1, F["title"])
+    text(dr, (52, 74), t2, F["sub"], GREY)
     # clock + time-lapse rate
     panel(dr, (1640, 24, 1892, 128))
     text(dr, (1866, 32), "SHIFT TIME", F["kpil"], GREY, "ra")
@@ -94,10 +97,14 @@ def draw(im, h):
         text(dr, (1846, y), str(w), F["kpil"], WHITE)
     # caption (lower third) + tote legend
     cap = h["caption"]
-    tw = dr.textlength(cap, font=F["cap"]) / s
+    fc, px = F["cap"], 30
+    while px > 20 and dr.textlength(cap, font=fc) / s > 1300:   # shrink a long caption to stay clear of the KPIs
+        px -= 1
+        fc = font(px, True)
+    tw = dr.textlength(cap, font=fc) / s
     panel(dr, (28, 950, 28 + max(tw, 640) + 48, 1052))
     dr.rectangle([S(28), S(950), S(34), S(1052)], fill=ACCENT)
-    text(dr, (52, 962), cap, F["cap"])
+    text(dr, (52, 962 + (30 - px) / 2), cap, fc)
     lx = 52
     for key, lab in [("normal", "normal order"), ("rush", "rush order"), ("pick", "being picked"), ("idle", "empty")]:
         dr.rounded_rectangle([S(lx), S(1014), S(lx + 22), S(1032)], radius=S(4), fill=TOTE[key])
