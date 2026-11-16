@@ -29,7 +29,8 @@ One 8-hour shift under the learned masked-PPO dispatch policy, replayed inside N
   dispatched, arrived at the zone, pick start and end, back at the depot, packed). For each frame the replay works out
   where every order is and places the robots accordingly, so the video shows exactly what the SimPy model decided.
 * **Real warehouse layout.** The model's four picking zones are four rack aisles; the depot is a packing area with
-  six robot docks on the open floor. Robots (NVIDIA's iw.hub AMR carrying a KLT tote) drive a two-lane route along the
+  six robot docks on the open floor. Robots (NVIDIA's iw.hub AMR carrying a KLT tote, raised by the asset's own
+  bounding box so the wheels sit on the floor) drive a two-lane route along the
   cross aisle into their zone, queue behind the robot being picked, and return on the opposite lane. Tote colour shows
   the order state: blue normal, red rush, green being picked, grey empty.
 * **People doing the actual work.** While the simulator says a pick is in progress, the picker turns to the rack,
@@ -38,7 +39,8 @@ One 8-hour shift under the learned masked-PPO dispatch policy, replayed inside N
   packed. NVIDIA's motion library has walking and idling clips but no pick or place motion, so `isaac/pose.py` poses
   the work procedurally on top of a retargeted idle clip: a spine bend and a knee bend chosen per reach (the least
   effort posture that brings the shoulders within reach), two-bone arm IK onto the parcel, and legs blended from the
-  walk-in-place clip while turning, so feet step instead of sliding. The clips themselves are retargeted from the
+  walk-in-place clip while turning, so feet step instead of sliding. Every frame the character's root height is
+  corrected so the lowest foot stays on the floor, and the hand targets move with it. The clips themselves are retargeted from the
   biped rig to the characters' Reallusion skeleton by `isaac/retarget.py` (each joint's rotation is transferred
   from its rest pose in skeleton space).
 * **Edited like a product video.** Five shots (establishing crane, a camera following one robot, a picking aisle, the

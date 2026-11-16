@@ -548,7 +548,10 @@ for i, c in enumerate(CHARS):
     WORKERS.append({"a": a, "url": url, "poser": ps, "t": t_op, "r": r_op, "xy": np.array([root[0], root[1]]),
                     "z0": float(root[2]), "fwd": math.atan2(ps.fwd_r[1], ps.fwd_r[0]), "phase": int(FPS * 1.37 * i),
                     "carton": HAND[i]})
-    print("worker", c, "body forward in root frame", np.round(ps.fwd_r, 3), "arm", round(ps.arm_len, 3), flush=True)
+    print("worker", c, "body forward in root frame", np.round(ps.fwd_r, 3), "arm", round(ps.arm_len, 3),
+          "rest foot h", round(ps.foot_h0, 3), flush=True)
+    ps.pose(CLIPS[(url, "idle")][0])
+    print("  idle clip foot correction dz", round(ps.last_dz, 3), flush=True)
 
 # a work cycle: turn to the pick point A, reach, grip, lift, turn to the place point B, lower, release, step back
 PHASES = [("turnA", 0.00, 0.15), ("reach", 0.15, 0.29), ("grip", 0.29, 0.34), ("lift", 0.34, 0.44),
@@ -643,6 +646,7 @@ def drive(W, sec, m=None, idle_psi=0.0):
     W["a"].GetRotationsAttr().Set(Poser.quats(L))
     W["a"].GetTranslationsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(*map(float, t)) for t in Tr]))
     W["r"].Set(math.degrees(psi - W["fwd"]))
+    W["t"].Set(Gf.Vec3d(float(W["xy"][0]), float(W["xy"][1]), W["z0"] + ps.last_dz))   # feet on the floor
     pc = W["carton"]
     where = None if m is None else m["parcel"]
     p, yaw = None, psi

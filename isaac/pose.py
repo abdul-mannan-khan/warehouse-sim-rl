@@ -6,7 +6,8 @@ work is posed procedurally on top of a retargeted idle clip:
 * a forward bend distributed over the three spine joints,
 * two-bone IK on each arm (shoulder, elbow, wrist) towards a hand target, elbows kept down and out,
 * leg rotations blended in from the walk-in-place clip while the character turns, so feet step instead
-  of sliding.
+  of sliding,
+* a root height correction (`last_dz`) that keeps the lowest foot on the floor in every pose.
 
 Targets are given in the character's body frame (metres: forward, left, up from the point between the
 feet), converted to skeleton space with the character's own skeleton-to-root transform.
@@ -115,6 +116,10 @@ class Poser:
         s0, e0, w0 = self.arm["L"]
         self.arm_len = (np.linalg.norm(P[e0] - P[s0]) + np.linalg.norm(P[w0] - P[e0])) / self.unit
         self.L0 = L0
+        # feet: joints that touch the ground, and their height in the rest pose (the mesh stands on z=0 there)
+        self.feet = [j[f"{s}_{n}"] for s in "LR" for n in ("Foot", "ToeBase") if f"{s}_{n}" in j]
+        self.foot_h0 = min(self.skel_to_body(P[i])[2] for i in self.feet)
+        self.last_dz = 0.0
         self._build_reach()
 
     # skeleton <-> root frame
@@ -190,6 +195,10 @@ class Poser:
             p = self.par[self.hip]
             up_local = (G[p].T if p >= 0 else np.eye(3)) @ self.up_s
             T[self.hip] = T[self.hip] - up_local * self.leg_len * (1 - math.cos(squat))
+        # keep the lowest foot on the floor: root height correction (metres) for this pose
+        _, Pf = self.fk(L, T)
+        dz = self.foot_h0 - min(self.skel_to_body(Pf[i])[2] for i in self.feet)
+        self.last_dz = dz
         if abs(bend) > 1e-4:
             for i, frac in zip(self.spine, (0.4, 0.35, 0.25)):
                 G, _ = self.fk(L, T)
@@ -200,7 +209,7 @@ class Poser:
                 if tgt is None or w <= 1e-4:
                     continue
                 wrist = P0[self.arm[side][2]]
-                t = self.body_to_skel(*tgt)
+                t = self.body_to_skel(tgt[0], tgt[1], tgt[2] - dz)   # the root is raised by dz
                 t = wrist + (t - wrist) * w if w < 1 else t
                 out = self.left_s * (1.0 if side == "L" else -1.0)
                 pole = -self.up_s * 0.8 + out * 0.6 - self.fwd_s * 0.2
@@ -214,7 +223,7 @@ class Poser:
             for b in np.radians(np.arange(0, 80, 5)):
                 L, T = self.pose(self.L0, b, None, squat=q)
                 _, P = self.fk(L, T)
-                sh = {sd: self.skel_to_body(P[self.arm[sd][0]]) for sd in "LR"}
+                sh = {sd: self.skel_to_body(P[self.arm[sd][0]]) + np.array([0.0, 0.0, self.last_dz]) for sd in "LR"}
                 self.grid.append((b + 0.8 * q, b, q, sh))
         self.grid.sort(key=lambda g: g[0])
 
@@ -230,7 +239,7 @@ class Poser:
         return best
 
     def hand_mid(self, L, T):
-        """Body-frame point between the palms (where a held carton sits)."""
+        """Body-frame point between the palms (where a held carton sits), relative to the floor point."""
         _, P = self.fk(L, T)
         unit = self.unit
         pts = []
@@ -238,7 +247,7 @@ class Poser:
             _, e, w = self.arm[side]
             d = P[w] - P[e]
             pts.append(P[w] + d / np.linalg.norm(d) * 0.07 * unit)   # palm centre, just past the wrist
-        return self.skel_to_body((pts[0] + pts[1]) / 2)
+        return self.skel_to_body((pts[0] + pts[1]) / 2) + np.array([0.0, 0.0, self.last_dz])
 
     @staticmethod
     def quats(L):
