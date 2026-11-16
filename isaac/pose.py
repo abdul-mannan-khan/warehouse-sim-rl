@@ -7,7 +7,8 @@ work is posed procedurally on top of a retargeted idle clip:
 * two-bone IK on each arm (shoulder, elbow, wrist) towards a hand target, elbows kept down and out,
 * leg rotations blended in from the walk-in-place clip while the character turns, so feet step instead
   of sliding,
-* a root height correction (`last_dz`) that keeps the lowest foot on the floor in every pose.
+* a root height correction (`last_dz`) that keeps the lowest point of the shoe soles (mesh vertices carried
+  by the foot joints) on the floor in every pose, so feet neither float nor sink when the character squats.
 
 Targets are given in the character's body frame (metres: forward, left, up from the point between the
 feet), converted to skeleton space with the character's own skeleton-to-root transform.
@@ -120,7 +121,27 @@ class Poser:
         self.feet = [j[f"{s}_{n}"] for s in "LR" for n in ("Foot", "ToeBase") if f"{s}_{n}" in j]
         self.foot_h0 = min(self.skel_to_body(P[i])[2] for i in self.feet)
         self.last_dz = 0.0
+        self.sole = None                           # (joint indices, joint-local points) on the shoe soles
+        self.z0 = 0.0
         self._build_reach()
+
+    def set_sole(self, joints, local_pts, z0):
+        """Ground on the mesh itself: sole vertices bound to their joint, and the root height z0 at which the
+        bind-pose mesh stands on the floor. After this, every pose is lifted or lowered so the lowest sole point
+        touches the floor exactly."""
+        self.sole = (np.asarray(joints, int), np.asarray(local_pts, float))
+        self.z0 = float(z0)
+        self._build_reach()
+
+    def ground_dz(self, L, T):
+        """Root height change (metres) that puts the lowest foot point of this pose on the floor."""
+        G, P = self.fk(L, T)
+        if self.sole is None:
+            return self.foot_h0 - min(self.skel_to_body(P[i])[2] for i in self.feet)
+        js, ls = self.sole
+        pts = np.einsum("nij,nj->ni", G[js], ls) + P[js]
+        z = (pts @ self.A.T + self.b)[:, 2]
+        return -float(z.min()) - self.z0
 
     # skeleton <-> root frame
     def _dir_to_root(self, v):
@@ -196,8 +217,7 @@ class Poser:
             up_local = (G[p].T if p >= 0 else np.eye(3)) @ self.up_s
             T[self.hip] = T[self.hip] - up_local * self.leg_len * (1 - math.cos(squat))
         # keep the lowest foot on the floor: root height correction (metres) for this pose
-        _, Pf = self.fk(L, T)
-        dz = self.foot_h0 - min(self.skel_to_body(Pf[i])[2] for i in self.feet)
+        dz = self.ground_dz(L, T)
         self.last_dz = dz
         if abs(bend) > 1e-4:
             for i, frac in zip(self.spine, (0.4, 0.35, 0.25)):

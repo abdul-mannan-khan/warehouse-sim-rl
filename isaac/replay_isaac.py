@@ -523,6 +523,53 @@ from retarget import Retargeter                        # noqa: E402
 from pose import Poser, smooth as sm                   # noqa: E402
 
 BIPED = f"{ROOT}/Isaac/People/Characters/Biped_Setup.usd"
+
+
+def sole_points(char_prim, skel, r, ps, band=0.015, keep=400):
+    """Shoe-sole vertices of a character: the lowest skinned vertices in the bind pose, each expressed in the
+    frame of the joint that carries it most, so the soles can be followed through any pose."""
+    from retarget import mat_rot
+    bind = [mat_rot(m) for m in UsdSkel.Skeleton(skel).GetBindTransformsAttr().Get()]
+    names = list(UsdSkel.Skeleton(skel).GetJointsAttr().Get())
+    out_j, out_p = [], []
+    for prim in Usd.PrimRange(char_prim):
+        if not prim.IsA(UsdGeom.Mesh):
+            continue
+        b = UsdSkel.BindingAPI(prim)
+        ji, jw = b.GetJointIndicesPrimvar(), b.GetJointWeightsPrimvar()
+        if not ji or not ji.HasValue() or not jw or not jw.HasValue():
+            continue
+        pts = np.array(UsdGeom.Mesh(prim).GetPointsAttr().Get(), float)
+        if not len(pts):
+            continue
+        k = ji.GetElementSize()
+        idx = np.array(ji.Get(), int)
+        wts = np.array(jw.Get(), float)
+        if len(idx) != len(pts) * k:                   # constant interpolation: one influence set for the mesh
+            idx = np.tile(idx[:k], len(pts))
+            wts = np.tile(wts[:k], len(pts))
+        idx, wts = idx.reshape(-1, k), wts.reshape(-1, k)
+        mj = b.GetJointsAttr().Get() if b.GetJointsAttr() and b.GetJointsAttr().HasValue() else None
+        remap = np.array([names.index(n) for n in mj]) if mj else np.arange(len(names))
+        gb = b.GetGeomBindTransformAttr().Get() if b.GetGeomBindTransformAttr().HasValue() else Gf.Matrix4d(1)
+        g = np.array([[gb[i][j] for j in range(4)] for i in range(4)])
+        ps_ = pts @ g[:3, :3] + g[3, :3]                # bind (skeleton) space
+        out_p.append(ps_)
+        out_j.append(remap[idx[np.arange(len(pts)), wts.argmax(1)]])
+    if not out_p:
+        print("  no skinned meshes found for sole points", flush=True)
+        return [], []
+    P = np.concatenate(out_p)
+    J = np.concatenate(out_j)
+    h = P @ ps.up_s
+    sel = np.where(h <= h.min() + band * ps.unit)[0]
+    if len(sel) > keep:
+        sel = sel[np.linspace(0, len(sel) - 1, keep).astype(int)]
+    loc = [bind[J[i]][0].T @ (P[i] - bind[J[i]][1]) for i in sel]
+    jn = sorted({ps.rt.tj[J[i]] for i in sel})
+    print("  sole points", len(sel), "on joints", jn, flush=True)
+    return [int(J[i]) for i in sel], loc
+
 RT, CLIPS, WORKERS = {}, {}, []
 xcache = UsdGeom.XformCache()
 for i, c in enumerate(CHARS):
@@ -544,6 +591,9 @@ for i, c in enumerate(CHARS):
     skel_to_root = xcache.GetLocalToWorldTransform(skel) * xcache.GetLocalToWorldTransform(
         stage.GetPrimAtPath(c)).GetInverse()
     ps = Poser(r, skel_to_root)
+    sj, sp = sole_points(stage.GetPrimAtPath(c), skel, r, ps)
+    if len(sj):
+        ps.set_sole(sj, sp, float(t_op.Get()[2]))
     root = t_op.Get()
     WORKERS.append({"a": a, "url": url, "poser": ps, "t": t_op, "r": r_op, "xy": np.array([root[0], root[1]]),
                     "z0": float(root[2]), "fwd": math.atan2(ps.fwd_r[1], ps.fwd_r[0]), "phase": int(FPS * 1.37 * i),
@@ -551,7 +601,10 @@ for i, c in enumerate(CHARS):
     print("worker", c, "body forward in root frame", np.round(ps.fwd_r, 3), "arm", round(ps.arm_len, 3),
           "rest foot h", round(ps.foot_h0, 3), flush=True)
     ps.pose(CLIPS[(url, "idle")][0])
-    print("  idle clip foot correction dz", round(ps.last_dz, 3), flush=True)
+    print("  idle clip foot correction dz", round(ps.last_dz, 3), "sole points", len(sj), flush=True)
+    ps.pose(ps.L0)
+    print("  rest pose dz", round(ps.last_dz, 3), " squat 40deg dz",
+          round((ps.pose(CLIPS[(url, "idle")][0], 0.3, None, squat=math.radians(40)), ps.last_dz)[1], 3), flush=True)
 
 # a work cycle: turn to the pick point A, reach, grip, lift, turn to the place point B, lower, release, step back
 PHASES = [("turnA", 0.00, 0.15), ("reach", 0.15, 0.29), ("grip", 0.29, 0.34), ("lift", 0.34, 0.44),
