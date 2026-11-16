@@ -3,14 +3,16 @@
     /isaac-sim/python.sh isaac/replay_isaac.py --trace media/trace.json --out frames/
     /isaac-sim/python.sh isaac/replay_isaac.py --trace media/trace.json --out preview/ --preview
     add --mocap mocap/ to animate the workers with motion-capture clips (export_mocap.py, README)
+    add --packers people to put human packers back at the packing tables instead of UR5e arms
 
 The SimPy event trace drives everything. For each frame we compute where every order is in its life
 cycle (waiting, robot driving out, queueing at the picker, being picked, driving back) and place NVIDIA's
 iw.hub robots along aisle routes in the `full_warehouse` environment. The four picking zones of the model are
-mapped to four rack aisles and the depot to a packing area on the open floor. Pickers and packers are
-NVIDIA's characters. While the simulator says a pick is in progress, the picker turns to the rack, takes a
-carton off the shelf and places it in the robot's tote; packers move items from the incoming bin into a
-shipping box while totes wait to be packed. With --mocap the work is built on Adobe Mixamo motion capture
+mapped to four rack aisles and the depot to a packing area on the open floor. Pickers are NVIDIA's
+characters. While the simulator says a pick is in progress, the picker turns to the rack, takes a carton off
+the shelf and places it in the robot's tote. At the packing tables UR5e arms with Robotiq 2F-85 grippers move
+items from the incoming bin into a shipping box while totes wait to be packed (arm.py: kinematics and IK; the
+replay poses the links directly, no physics). With --mocap the work is built on Adobe Mixamo motion capture
 (a stepping turn, a one-handed put-down with knee bend) retargeted onto the characters (mocap.py, work.py),
 with the hand guided onto the parcel by IK and the supporting foot held in place; without it, the motions are
 posed procedurally on a retargeted idle clip (pose.py).
@@ -23,6 +25,7 @@ import argparse
 import json
 import math
 import os
+import sys
 import time
 
 ap = argparse.ArgumentParser()
@@ -37,6 +40,8 @@ ap.add_argument("--end", type=int, default=-1)
 ap.add_argument("--hud-only", action="store_true", help="write hud.json for the frames without rendering")
 ap.add_argument("--frames", default="", help="comma-separated frame numbers to render (for checks)")
 ap.add_argument("--mocap", default="", help="folder with the clip_*.npz files written by export_mocap.py")
+ap.add_argument("--packers", choices=("arms", "people"), default="arms",
+                help="who works the packing tables: UR5e arms (default) or human packers")
 args = ap.parse_args()
 W, H = map(int, args.res.split("x"))
 
@@ -52,6 +57,9 @@ from PIL import Image                                  # noqa: E402
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdShade, UsdSkel, Vt  # noqa: E402
 from isaacsim.storage.native import get_assets_root_path  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import arm as armk                                     # noqa: E402
+
 ROOT = get_assets_root_path()
 ENV = f"{ROOT}/Isaac/Environments/Simple_Warehouse/full_warehouse.usd"
 A_ROBOT = f"{ROOT}/Isaac/Robots/Idealworks/iwhub/iw_hub_static.usd"
@@ -60,6 +68,7 @@ A_TABLE = f"{ROOT}/Isaac/Props/PackingTable/packing_table.usd"
 A_FORKLIFT = f"{ROOT}/Isaac/Props/Forklift/forklift.usd"
 A_PALLET = f"{ROOT}/Isaac/Props/Pallet/pallet.usd"
 A_BOX = f"{ROOT}/Isaac/Environments/Simple_Warehouse/Props/SM_CardBoxA_01.usd"
+A_ARM = f"{ROOT}/Isaac/Robots/UniversalRobots/ur5e/ur5e.usd"
 PEOPLE = [f"{ROOT}/Isaac/People/Characters/{c}/{c}.usd" for c in
           ("male_adult_construction_05_new", "male_adult_construction_01_new", "male_adult_construction_03",
            "female_adult_police_03_new")]
@@ -384,6 +393,7 @@ reference("/World/forklift", A_FORKLIFT, (-22.5, -11.5, 0.0), 35.0)
 # stands up-aisle of the line between tote and shelf, 0.68 m from the tote and 0.52 m from the shelf, so the
 # turn between them is ~130 deg, the angle of the captured turn.
 MOCAP = bool(args.mocap)
+ARMS = args.packers == "arms"
 
 
 def picker_home(z):
@@ -404,6 +414,9 @@ for z in range(NZ):
 M["card"] = material("card", (0.60, 0.43, 0.25), rough=0.85)
 M["tape"] = material("tape", (0.80, 0.68, 0.45), rough=0.4)
 M["bin"] = material("bin", (0.25, 0.42, 0.62), rough=0.5)
+M["pedestal"] = material("pedestal", (0.32, 0.34, 0.37), rough=0.45, metal=0.3)
+M["plate"] = material("plate", (0.55, 0.57, 0.6), rough=0.3, metal=0.8)
+M["product"] = material("product", (0.93, 0.93, 0.9), rough=0.45)
 CART = (0.17, 0.21, 0.14)                         # parcel: depth, width, height (m)
 
 
@@ -481,17 +494,55 @@ tb = bbox(stage.GetPrimAtPath("/World/pack/table0/asset"))
 TABLE_TOP, TABLE_FRONT = float(tb.GetMax()[2]), float(tb.GetMin()[1]) - PACK_Y
 print("table", tb.GetSize(), "top", TABLE_TOP, "front", TABLE_FRONT, flush=True)
 STATIONS = []
+ARMS_ = []
+ITEM = (0.065, 0.12, 0.09)                     # packed item: across the jaw, along the jaw, height (m)
+
+
+def add_arm(i, base, sup, box):
+    """UR5e on a pedestal at the front of packing table i, facing the table (+y); its cycle takes an item from
+    the incoming bin `sup` to the shipping box `box`."""
+    root = f"/World/pack/arm{i}"
+    xform(root, tuple(base), 0.0)
+    ped = UsdGeom.Cube.Define(stage, root + "/pedestal")
+    ped.CreateSizeAttr(1.0)
+    ped.AddTranslateOp().Set(Gf.Vec3d(0, 0, -base[2] / 2))
+    ped.AddScaleOp().Set(Gf.Vec3f(0.20, 0.20, float(base[2])))
+    bind(ped.GetPrim(), M["pedestal"])
+    plate = UsdGeom.Cylinder.Define(stage, root + "/plate")
+    plate.CreateRadiusAttr(0.11)
+    plate.CreateHeightAttr(0.012)
+    plate.AddTranslateOp().Set(Gf.Vec3d(0, 0, -0.006))
+    bind(plate.GetPrim(), M["plate"])
+    a = stage.DefinePrim(root + "/asset", "Xform")
+    a.GetReferences().AddReference(A_ARM)
+    vs = a.GetVariantSets()
+    for k, v in (("Gripper", "Robotiq_2f_85"), ("Physics", "None"), ("Sensor", "None")):
+        if vs.HasVariantSet(k):
+            vs.GetVariantSet(k).SetVariantSelection(v)
+    lift = (ITEM[2] / 2) - 0.09 + 0.02                # item centre relative to the parcel centre the packer used
+    src = sup - base + np.array([0.0, 0.0, lift])
+    dst = box - base + np.array([0.0, 0.0, -0.10 + 0.015 + ITEM[2] / 2])
+    items = [carton(f"/World/pack/{k}{i}", ITEM) for k in ("item", "placed")]
+    for it in items:                                   # white product boxes stand out from the brown shipping box
+        bind(stage.GetPrimAtPath(str(it["prim"].GetPath()) + "/box"), M["product"])
+    ARMS_.append({"root": root, "base": base, "cycle": armk.PickPlace(src, dst, ITEM),
+                  "item": items[0], "placed": items[1]})
+
+
 for i, x in enumerate(TABLE_X):
     fy = PACK_Y + TABLE_FRONT
     sup = np.array([x - 0.55, fy + 0.30, TABLE_TOP + 0.09])
     box = np.array([x + 0.20, fy + 0.30, TABLE_TOP + 0.10])
     reference(f"/World/pack/bin{i}", A_TOTE, (sup[0], sup[1], TABLE_TOP + 0.005), 0.0)
     open_box(f"/World/pack/ship{i}", (box[0], box[1], TABLE_TOP + 0.003))
+    STATIONS.append((sup, box))
+    if ARMS:
+        add_arm(i, np.array([x - 0.175, fy - 0.13, TABLE_TOP]), sup, box)
+        continue
     path, url = f"/World/pack/packer{i}", PEOPLE[(NZ + i) % len(PEOPLE)]
     CHAR_OPS.append(reference(path, url, (x - 0.15, fy - (0.18 if MOCAP else 0.36), 0.0), 0.0))
     CHARS.append(path)
     CHAR_URL.append(url)
-    STATIONS.append((sup, box))
 for _ in range(60):
     app.update()
 for i in range(3):
@@ -811,6 +862,9 @@ def animate_workers(f, st, rate):
         m["A"], m["A_yaw"] = A, 0.0
         items[o["robot"]] = min(idx + (1 if m["placed"] else 0), 3)
         drive(W, sec, m, psi_idle)
+    if ARMS:
+        animate_arms(f, sec, rate)
+        return items
     for i, (sup, box) in enumerate(STATIONS):
         W = WORKERS[NZ + i]
         cyc = (sec + 1.3 * i) / PACK_T
@@ -823,6 +877,66 @@ def animate_workers(f, st, rate):
         else:
             drive(W, sec, None, heading_to(W, box))
     return items
+
+
+def animate_arms(f, sec, rate):
+    """Pose the packing arms for frame f: a bin-to-box cycle while their station has totes to pack, parked at
+    the cycle's home pose (gripper open) otherwise. The shipping box keeps the last item packed."""
+    for i, A in enumerate(ARMS_):
+        cyc = A["cycle"]
+        D = cyc.T
+        c = (sec + 1.3 * i) / D
+        u = c - int(c)
+        f0 = max(f - int(u * D * FPS), SHOT_START[PLAN[f][0]])
+        active = rate < 30 and state_at(PLAN[f0][1])["packing"] > i
+        q, a, state = cyc.at(u * D) if active else cyc.at(0.0)
+        pose_arm(A, q, a)
+        it, pl = A["item"], A["placed"]
+        show(pl["prim"], active)
+        show(it["prim"], active and state != "dst")
+        if active:
+            b = A["base"]
+            pl["t"].Set(Gf.Vec3d(*map(float, cyc.dst + b)))
+            pl["r"].Set(0.0)
+            if state == "src":
+                it["t"].Set(Gf.Vec3d(*map(float, cyc.src + b)))
+                it["r"].Set(0.0)
+            elif state == "held":
+                T = cyc.held_pose(q)
+                it["t"].Set(Gf.Vec3d(*map(float, T[:3, 3] + b)))
+                it["r"].Set(math.degrees(math.atan2(T[1, 1], T[0, 1])))
+
+
+def _set_pose(prim, T):
+    """Write a 4x4 pose into a prim's translate/orient ops, keeping the attribute precision it was authored with."""
+    t, o = prim.GetAttribute("xformOp:translate"), prim.GetAttribute("xformOp:orient")
+    p, q = T[:3, 3], armk.mquat(T[:3, :3])
+    if "3f" in str(t.GetTypeName()):
+        t.Set(Gf.Vec3f(*map(float, p)))
+    else:
+        t.Set(Gf.Vec3d(*map(float, p)))
+    if "quatf" in str(o.GetTypeName()):
+        o.Set(Gf.Quatf(float(q[0]), Gf.Vec3f(*map(float, q[1:]))))
+    else:
+        o.Set(Gf.Quatd(float(q[0]), Gf.Vec3d(*map(float, q[1:]))))
+
+
+def pose_arm(A, q, a):
+    if "prims" not in A:
+        r = A["root"] + "/asset"
+        A["prims"] = {k: stage.GetPrimAtPath(f"{r}/{k}") for k in armk.LINKS + ["Gripper"]}
+        A["fprims"] = {k: stage.GetPrimAtPath(f"{r}/Gripper/Robotiq_2F_85/{k}") for k in armk.fingers(0.0)}
+        miss = [k for k, p in list(A["prims"].items()) + list(A["fprims"].items())
+                if not p.IsValid() or not p.GetAttribute("xformOp:orient").IsValid()]
+        print("arm", A["root"], "missing prims:", miss or "none", flush=True)
+        A["prims"] = {k: p for k, p in A["prims"].items() if k not in miss}
+        A["fprims"] = {k: p for k, p in A["fprims"].items() if k not in miss}
+    F = armk.fk(q)
+    for k, p in A["prims"].items():
+        _set_pose(p, F["gripper" if k == "Gripper" else k])
+    for k, T in armk.fingers(a).items():
+        if k in A["fprims"]:
+            _set_pose(A["fprims"][k], T)
 
 
 # ------------------------------------------------------------------ motion-capture workers
@@ -927,6 +1041,9 @@ def animate_workers_mocap(f, st, rate):
         B = robot_point(pos, heading, (slot[0], slot[1], ITEM_Z + slot[2] + 0.01))
         placed = mocap_pose(W, sec, tc, D, wkm.PICK_SEG, A, B, ("pick", idx % 4, min(idx, 2)), e)
         items[o["robot"]] = min(idx + (1 if placed else 0), 3)
+    if ARMS:
+        animate_arms(f, sec, rate)
+        return items
     for i, (sup, box) in enumerate(STATIONS):
         W = WORKERS[NZ + i]
         D = wkm.PACK_CYCLE
@@ -1076,7 +1193,9 @@ def apply(f):
     else:
         caption = {"establish": "NVIDIA warehouse digital twin: 4 picking zones, packing area, 6 iw.hub robots",
                    "aisle": f"Zone {ex.get('zone', 0) + 1}: the picker loads each robot's tote while the next ones queue",
-                   "depot": "Packing area: picked items are packed for shipping; idle robots wait at their docks",
+                   "depot": ("Packing area: UR5e arms pack picked items for shipping; idle robots wait at their docks"
+                             if ARMS else
+                             "Packing area: picked items are packed for shipping; idle robots wait at their docks"),
                    "overview": "Rest of the shift"}[name]
     return {"frame": f, "shot": name, "u": u, "t": t_, "rate": rate, "caption": caption, "done": st["done"],
             "late": st["late"], "ct": st["ct"], "waiting": [len(w) for w in st["waiting"]],

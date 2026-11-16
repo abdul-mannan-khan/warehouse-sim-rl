@@ -22,12 +22,21 @@ video: [media/demo.mp4](media/demo.mp4) — regenerate with `python render_video
 |---|---|
 | ![Follow camera](media/isaac_follow.jpg) | ![Pick aisle](media/isaac_aisle.jpg) |
 
+![UR5e arms packing at the packing tables](media/isaac_packing.jpg)
+*Packing area: UR5e arms with Robotiq grippers move items from the incoming bins into shipping boxes.*
+
 One 8-hour shift under the learned masked-PPO dispatch policy, replayed inside NVIDIA's warehouse digital twin
 (`full_warehouse.usd`) in **Isaac Sim 6.2**, rendered headless with the RTX renderer through Replicator.
 
 * **Driven by the simulator, frame by frame.** `tools/export_trace.py` records every order's life cycle (created,
   dispatched, arrived at the zone, pick start and end, back at the depot, packed). For each frame the replay works out
   where every order is and places the robots accordingly, so the video shows exactly what the SimPy model decided.
+* **Robot arms at the packing tables.** Each packing table has a UR5e with a Robotiq 2F-85 gripper on a pedestal
+  (NVIDIA's `ur5e.usd` asset). While totes are waiting to be packed, the arm reaches over the incoming bin, goes
+  straight down, closes the gripper on an item, lifts it out and lowers it into the open shipping box. The replay does
+  not step physics, so `isaac/arm.py` poses the links itself: forward kinematics over the asset's joint frames, a
+  damped least-squares IK for a top-down grasp (vertical moves re-solved every frame), and the gripper's parallelogram
+  finger linkage. `--packers people` puts human packers back.
 * **Real warehouse layout.** The model's four picking zones are four rack aisles; the depot is a packing area with
   six robot docks on the open floor. Robots (NVIDIA's iw.hub AMR carrying a KLT tote, raised by the asset's own
   bounding box so the wheels sit on the floor) drive a two-lane route along the
@@ -35,8 +44,7 @@ One 8-hour shift under the learned masked-PPO dispatch policy, replayed inside N
   the order state: blue normal, red rush, green being picked, grey empty.
 * **People doing the actual work, from motion capture.** While the simulator says a pick is in progress, the
   picker turns to the rack, takes a parcel off the shelf, turns back with it and bends at the knees to lower it into
-  the robot's tote; the tote fills up item by item and leaves with them. Packers turn between the incoming bin and an
-  open shipping box and lean in to move items across while totes are waiting to be packed. NVIDIA's motion library
+  the robot's tote; the tote fills up item by item and leaves with them. NVIDIA's motion library
   has no pick or place motion, so the work is built from Adobe Mixamo motion-capture clips (a stepping turn and a
   one-handed put-down), retargeted onto the characters' Reallusion skeleton by `isaac/mocap.py` (each joint's
   rotation is transferred from its rest pose, with a per-bone correction for the different rest poses) and sequenced
@@ -123,7 +131,7 @@ mlflow ui                          # http://127.0.0.1:5000
   for a learned-policy panel).
 * `tools/export_trace.py` + `isaac/replay_isaac.py` + `isaac/retarget.py` + `isaac/pose.py` + `isaac/overlay.py` —
   export one simulated shift as an event trace and replay it in NVIDIA Isaac Sim: the warehouse digital twin, iw.hub
-  robots on aisle routes, pickers and packers handling parcels (retargeted clips plus procedural reach, IK and
+  robots on aisle routes, pickers handling parcels, UR5e arms packing (`isaac/arm.py`) (retargeted clips plus procedural reach, IK and
   squat), a multi-shot camera, and RTX rendering through Replicator, driven frame by frame from the trace, with
   titles, clock and KPIs drawn on afterwards.
 
