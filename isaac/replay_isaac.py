@@ -2,14 +2,18 @@
 
     /isaac-sim/python.sh isaac/replay_isaac.py --trace media/trace.json --out frames/
     /isaac-sim/python.sh isaac/replay_isaac.py --trace media/trace.json --out preview/ --preview
+    add --mocap mocap/ to animate the workers with motion-capture clips (export_mocap.py, README)
 
 The SimPy event trace drives everything. For each frame we compute where every order is in its life
 cycle (waiting, robot driving out, queueing at the picker, being picked, driving back) and place NVIDIA's
 iw.hub robots along aisle routes in the `full_warehouse` environment. The four picking zones of the model are
 mapped to four rack aisles and the depot to a packing area on the open floor. Pickers and packers are
 NVIDIA's characters. While the simulator says a pick is in progress, the picker turns to the rack, takes a
-carton off the shelf and places it in the robot's tote (pose.py: spine bend, squat and arm IK on top of a
-retargeted idle clip); packers move items from the incoming bin into a shipping box while totes wait to be packed.
+carton off the shelf and places it in the robot's tote; packers move items from the incoming bin into a
+shipping box while totes wait to be packed. With --mocap the work is built on Adobe Mixamo motion capture
+(a stepping turn, a one-handed put-down with knee bend) retargeted onto the characters (mocap.py, work.py),
+with the hand guided onto the parcel by IK and the supporting foot held in place; without it, the motions are
+posed procedurally on a retargeted idle clip (pose.py).
 
 The video is cut into five shots (establishing crane, a camera following one robot, a picker's aisle, the
 packing area, and an overview of the rest of the shift). Each shot covers a different stretch of the shift at
@@ -32,6 +36,7 @@ ap.add_argument("--start", type=int, default=0)
 ap.add_argument("--end", type=int, default=-1)
 ap.add_argument("--hud-only", action="store_true", help="write hud.json for the frames without rendering")
 ap.add_argument("--frames", default="", help="comma-separated frame numbers to render (for checks)")
+ap.add_argument("--mocap", default="", help="folder with the clip_*.npz files written by export_mocap.py")
 args = ap.parse_args()
 W, H = map(int, args.res.split("x"))
 
@@ -375,11 +380,24 @@ for i, (x, y) in enumerate([(-23.0, -5.0), (-23.0, -7.2), (-21.0, -5.0), (-21.0,
         reference(f"/World/pal/p{i}b{j}", A_BOX, (x - 0.3 + 0.6 * (j % 2), y + 0.25 - 0.5 * (j // 2), 0.16), 0.0)
 reference("/World/forklift", A_FORKLIFT, (-22.5, -11.5, 0.0), 35.0)
 
-# pickers: one per zone, standing between the robot stop and the rack face
+# pickers: one per zone, standing between the robot stop and the rack face. With motion capture the picker
+# stands up-aisle of the line between tote and shelf, 0.68 m from the tote and 0.52 m from the shelf, so the
+# turn between them is ~130 deg, the angle of the captured turn.
+MOCAP = bool(args.mocap)
+
+
+def picker_home(z):
+    if not MOCAP:
+        return ZONE_AISLE[z] + PICKER_DX, ZONE_PICK_Y[z]
+    span, dt, ds = RACK_FACE + 0.03 - LANE, 0.68, 0.52
+    px = (dt * dt - ds * ds + span * span) / (2 * span)
+    return ZONE_AISLE[z] + LANE + px, ZONE_PICK_Y[z] + math.sqrt(max(dt * dt - px * px, 0.0))
+
+
 CHARS, CHAR_URL, CHAR_OPS = [], [], []
 for z in range(NZ):
     path, url = f"/World/picker{z}", PEOPLE[z % len(PEOPLE)]
-    CHAR_OPS.append(reference(path, url, (ZONE_AISLE[z] + PICKER_DX, ZONE_PICK_Y[z], 0.0), 0.0))
+    CHAR_OPS.append(reference(path, url, (*picker_home(z), 0.0), 0.0))
     CHARS.append(path)
     CHAR_URL.append(url)
 
@@ -470,7 +488,7 @@ for i, x in enumerate(TABLE_X):
     reference(f"/World/pack/bin{i}", A_TOTE, (sup[0], sup[1], TABLE_TOP + 0.005), 0.0)
     open_box(f"/World/pack/ship{i}", (box[0], box[1], TABLE_TOP + 0.003))
     path, url = f"/World/pack/packer{i}", PEOPLE[(NZ + i) % len(PEOPLE)]
-    CHAR_OPS.append(reference(path, url, (x - 0.15, fy - 0.36, 0.0), 0.0))
+    CHAR_OPS.append(reference(path, url, (x - 0.15, fy - (0.18 if MOCAP else 0.36), 0.0), 0.0))
     CHARS.append(path)
     CHAR_URL.append(url)
     STATIONS.append((sup, box))
@@ -606,6 +624,30 @@ for i, c in enumerate(CHARS):
     print("  rest pose dz", round(ps.last_dz, 3), " squat 40deg dz",
           round((ps.pose(CLIPS[(url, "idle")][0], 0.3, None, squat=math.radians(40)), ps.last_dz)[1], 3), flush=True)
 
+if MOCAP:
+    import work as wkm                                 # noqa: E402
+    from mocap import MocapClip, mirror_data           # noqa: E402
+    MC = {}
+    for W_ in WORKERS:
+        url, ps = W_["url"], W_["poser"]
+        if url not in MC:
+            r = RT[url]
+            loc_r = np.stack([a for a, _ in r.t_local_rest])
+            MC[url] = {}
+            for key, name, strip, mirror in (("turn", "box_turn_b", True, False),
+                                             ("turn_m", "box_turn_b", True, True),
+                                             ("put_down", "putting_down", False, False),
+                                             ("pick_up", "picking_up", False, False)):
+                d = dict(np.load(os.path.join(args.mocap, f"clip_{name}.npz")))
+                if mirror:
+                    d = mirror_data(d)
+                m = MocapClip(d, r.tj, r.tpar, r.t_rest, r.t_bind_t, loc_r, ps.up_s, ps.leg_len)
+                m.set_forward(ps.fwd_s)
+                MC[url][key] = wkm.Clip(m, ps, strip_yaw=strip)
+            print("mocap clips for", url.rsplit("/", 1)[-1], flush=True)
+        W_["wk"] = wkm.Worker(ps, MC[url], CLIPS[(url, "idle")])
+        print("  put-down frames", W_["wk"].put_k0, W_["wk"].put_rel, W_["wk"].put_k1, flush=True)
+
 # a work cycle: turn to the pick point A, reach, grip, lift, turn to the place point B, lower, release, step back
 PHASES = [("turnA", 0.00, 0.15), ("reach", 0.15, 0.29), ("grip", 0.29, 0.34), ("lift", 0.34, 0.44),
           ("turnB", 0.44, 0.60), ("lower", 0.60, 0.73), ("release", 0.73, 0.78), ("ret", 0.78, 0.89),
@@ -717,13 +759,16 @@ def pick_cycles(o, rate):
     """Shelf-to-tote cycles shown for an order's pick at this time-lapse rate (0: too fast to show)."""
     end = o["pick_end"] if o["pick_end"] is not None else SHIFT          # still being picked at the end of the shift
     pv = (end - o["pick_start"]) * 60.0 / rate
+    if MOCAP:
+        cyc = wkm.PICK_CYCLE
+        return 0 if pv < 0.72 * cyc else max(1, int(pv / cyc))
     if pv < 2.4:
         return 0
     return max(1, int(pv / 4.2))
 
 
 def shelf_point(z, k):
-    dy = (-0.32, 0.18, 0.38, -0.08)[k % 4]
+    dy = ((-0.10, 0.05, -0.02, 0.12) if MOCAP else (-0.32, 0.18, 0.38, -0.08))[k % 4]
     return np.array([ZONE_AISLE[z] + RACK_FACE + 0.03, ZONE_PICK_Y[z] + dy, SHELF_Z + CART[2] / 2 + 0.005])
 
 
@@ -735,6 +780,8 @@ for _f, _p in enumerate(PLAN):
 
 def animate_workers(f, st, rate):
     """Pose pickers and packers for frame f; returns the number of parcels in each robot's tote."""
+    if MOCAP:
+        return animate_workers_mocap(f, st, rate)
     sec = f / FPS
     items = {}
     for r, (pos, heading, phase, rush, z, o) in st["robots"].items():
@@ -775,6 +822,121 @@ def animate_workers(f, st, rate):
             drive(W, sec, m)
         else:
             drive(W, sec, None, heading_to(W, box))
+    return items
+
+
+# ------------------------------------------------------------------ motion-capture workers
+ROOTS = {}                                         # (worker, cycle length, variant) -> root travel per frame
+EASE_IN = 0.45                                     # seconds to blend from the idle clip into work and back
+
+
+def world_xy(W, b, psi, root):
+    return np.array([root[0] + b[0] * math.cos(psi) - b[1] * math.sin(psi),
+                     root[1] + b[0] * math.sin(psi) + b[1] * math.cos(psi), b[2] + W["z0"]])
+
+
+def body_of(W, p, psi, root):
+    d = np.asarray(p[:2]) - root
+    return np.array([d[0] * math.cos(psi) + d[1] * math.sin(psi),
+                     -d[0] * math.sin(psi) + d[1] * math.cos(psi), p[2] - W["z0"]])
+
+
+def set_skeleton(W, L, Tr, psi, root):
+    W["a"].GetRotationsAttr().Set(Poser.quats(L))
+    W["a"].GetTranslationsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(*map(float, t)) for t in Tr]))
+    W["r"].Set(math.degrees(psi - W["fwd"]))
+    W["t"].Set(Gf.Vec3d(float(root[0]), float(root[1]), W["z0"] + W["poser"].last_dz))
+
+
+def idle_pose(W, sec, psi):
+    frames = CLIPS[(W["url"], "idle")]
+    L, Tr = W["poser"].pose(frames[(int(sec * FPS) + W["phase"]) % len(frames)])
+    set_skeleton(W, L, Tr, psi, W["xy"])
+    show(W["carton"]["prim"], False)
+
+
+def mocap_pose(W, sec, tc, D, segs, A, B, key, e=1.0, lean=(0.10, 0.15)):
+    """Pose worker W at time tc of a work cycle of length D that takes a parcel at A and delivers it to B
+    (world points). e < 1 blends towards the idle clip (start and end of a job). Returns whether the parcel
+    has been delivered."""
+    wk = W["wk"]
+    home = W["xy"]
+    psiS, psiR = heading_to(W, A), heading_to(W, B)
+    ctx = {"psiS": psiS, "psiR": psiR, "A": body_of(W, A, psiS, home), "B": body_of(W, B, psiR, home),
+           "lean": lean}
+    k = (id(W), round(D, 2), key)
+    if k not in ROOTS:
+        ROOTS[k] = wkm.plan_root(wk, segs, wkm.station_desc, D, ctx)
+    root = home + wkm.root_at(ROOTS[k], tc) * e
+    ctx["A"], ctx["B"] = body_of(W, A, psiS, root), body_of(W, B, psiR, root)
+    d = wkm.cycle_desc(wk, segs, wkm.station_desc, tc, D, ctx)
+    if e < 1.0:
+        frames = wk.idle
+        d = dict(d)
+        d["q"] = wkm.nlerp(frames[(int(sec * FPS) + W["phase"]) % len(frames)], d["q"], e)
+        d["psi"] = psiR + wkm.wrap(d["psi"] - psiR) * e
+        d["lean"] = d["lean"] * e
+        if d.get("hand") is not None:
+            d["hand"] = (d["hand"][0], d["hand"][1] * e)
+        d["look_w"] = d.get("look_w", 0.0) * e
+    L, Tr = wkm.apply_desc(wk, d)
+    psi = d["psi"]
+    set_skeleton(W, L, Tr, psi, root)
+    pc = W["carton"]
+    p, yaw = None, psi
+    if d["parcel"] == "src":
+        p, yaw = A, 0.0
+    elif d["parcel"] == "hand":
+        p = world_xy(W, wkm.palm(W["poser"], L, Tr), psi, root)
+    show(pc["prim"], p is not None)
+    if p is not None:
+        pc["t"].Set(Gf.Vec3d(*map(float, p)))
+        pc["r"].Set(math.degrees(yaw))
+    return d.get("placed", False)
+
+
+def animate_workers_mocap(f, st, rate):
+    sec = f / FPS
+    items = {}
+    for r, (pos, heading, phase, rush, z, o) in st["robots"].items():
+        if phase == "back":
+            items[r] = min(max(pick_cycles(o, rate), 1), 3)
+    for z in range(NZ):
+        W = WORKERS[z]
+        o = st["picking"][z]
+        stop = np.array([ZONE_AISLE[z] + LANE, ZONE_PICK_Y[z], ITEM_Z])
+        if o is None:
+            idle_pose(W, sec, heading_to(W, stop))
+            continue
+        pos, heading = st["robots"][o["robot"]][:2]
+        n = pick_cycles(o, rate)
+        end = o["pick_end"] if o["pick_end"] is not None else SHIFT
+        frac = (PLAN[f][1] - o["pick_start"]) / max(end - o["pick_start"], 1e-9)
+        if n == 0:
+            items[o["robot"]] = 1 if frac > 0.5 else 0
+            idle_pose(W, sec, heading_to(W, stop))
+            continue
+        pv = (end - o["pick_start"]) * 60.0 / rate
+        D = pv / n
+        c = min(max(frac, 0.0) * n, n - 1e-6)
+        idx = int(c)
+        tc = (c - idx) * D
+        e = wkm.minjerk(min(frac * pv / EASE_IN, (1.0 - frac) * pv / EASE_IN, 1.0))
+        slot = SLOTS[min(idx, 2)]
+        A = shelf_point(z, idx)
+        B = robot_point(pos, heading, (slot[0], slot[1], ITEM_Z + slot[2] + 0.01))
+        placed = mocap_pose(W, sec, tc, D, wkm.PICK_SEG, A, B, ("pick", idx % 4, min(idx, 2)), e)
+        items[o["robot"]] = min(idx + (1 if placed else 0), 3)
+    for i, (sup, box) in enumerate(STATIONS):
+        W = WORKERS[NZ + i]
+        D = wkm.PACK_CYCLE
+        cyc = (sec + 1.3 * i) / D
+        u = cyc - int(cyc)
+        f0 = max(f - int(u * D * FPS), SHOT_START[PLAN[f][0]])
+        if rate < 30 and state_at(PLAN[f0][1])["packing"] > i:
+            mocap_pose(W, sec, u * D, D, wkm.PACK_SEG, sup, box, ("pack",), 1.0, lean=(0.20, 0.35))
+        else:
+            idle_pose(W, sec, heading_to(W, box))
     return items
 
 

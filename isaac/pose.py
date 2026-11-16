@@ -236,6 +236,31 @@ class Poser:
                 self._ik(L, T, side, t, pole)
         return L, T
 
+    def look(self, L, T, target, w=1.0, max_ang=1.1):
+        """Turn the neck and head (40/60) so the face points at a body-frame point (f, l, h above the floor),
+        at most max_ang radians, scaled by w. Call after pose(); uses its root height correction."""
+        if w <= 1e-4 or "Head" not in self.j:
+            return L
+        h = self.j["Head"]
+        if not hasattr(self, "_head_fwd"):
+            G0, _ = self.fk(self.L0)
+            self._head_fwd = G0[h].T @ self.fwd_s
+        G, P = self.fk(L, T)
+        t = self.body_to_skel(target[0], target[1], target[2] - self.last_dz)
+        d = t - P[h]
+        cur = G[h] @ self._head_fwd
+        c = np.cross(cur, d)
+        s, dd = np.linalg.norm(c), float(cur @ d) / max(np.linalg.norm(d), 1e-9)
+        if s < 1e-9:
+            return L
+        ang = min(math.atan2(s / max(np.linalg.norm(d), 1e-9), dd), max_ang) * w
+        for name, frac in (("NeckTwist01", 0.4), ("Head", 0.6)):
+            if name in self.j:
+                i = self.j[name]
+                G, _ = self.fk(L, T)
+                self._set_global(L, G, i, rot(c, ang * frac) @ G[i])
+        return L
+
     def _build_reach(self):
         """Shoulder positions for a grid of (bend, squat), to pick the least effort posture for a reach."""
         self.grid = []

@@ -33,16 +33,28 @@ One 8-hour shift under the learned masked-PPO dispatch policy, replayed inside N
   bounding box so the wheels sit on the floor) drive a two-lane route along the
   cross aisle into their zone, queue behind the robot being picked, and return on the opposite lane. Tote colour shows
   the order state: blue normal, red rush, green being picked, grey empty.
-* **People doing the actual work.** While the simulator says a pick is in progress, the picker turns to the rack,
-  takes a parcel off the shelf, turns back and lowers it into the robot's tote; the tote fills up item by item and
-  leaves with them. Packers move items from the incoming bin into an open shipping box while totes are waiting to be
-  packed. NVIDIA's motion library has walking and idling clips but no pick or place motion, so `isaac/pose.py` poses
-  the work procedurally on top of a retargeted idle clip: a spine bend and a knee bend chosen per reach (the least
-  effort posture that brings the shoulders within reach), two-bone arm IK onto the parcel, and legs blended from the
-  walk-in-place clip while turning, so feet step instead of sliding. Every frame the character's root height is
-  corrected so the lowest foot stays on the floor, and the hand targets move with it. The clips themselves are retargeted from the
-  biped rig to the characters' Reallusion skeleton by `isaac/retarget.py` (each joint's rotation is transferred
-  from its rest pose in skeleton space).
+* **People doing the actual work, from motion capture.** While the simulator says a pick is in progress, the
+  picker turns to the rack, takes a parcel off the shelf, turns back with it and bends at the knees to lower it into
+  the robot's tote; the tote fills up item by item and leaves with them. Packers turn between the incoming bin and an
+  open shipping box and lean in to move items across while totes are waiting to be packed. NVIDIA's motion library
+  has no pick or place motion, so the work is built from Adobe Mixamo motion-capture clips (a stepping turn and a
+  one-handed put-down), retargeted onto the characters' Reallusion skeleton by `isaac/mocap.py` (each joint's
+  rotation is transferred from its rest pose, with a per-bone correction for the different rest poses) and sequenced
+  by `isaac/work.py`:
+  * legs, hips and knee bend come from the clips; the turn is mirrored for right turns and its pelvis and spine are
+    stood upright (Mixamo's turn leans back against a heavy box, which looks wrong with a small parcel),
+  * the right hand is guided onto the parcel on the shelf and onto its slot in the tote by two-bone IK on top of the
+    clip, with minimum-jerk reaches, and the head looks at what the hand is about to touch,
+  * segments are cross-faded, so the motion never stops dead between steps,
+  * each frame the supporting foot is held in place and the character's root follows it, so feet do not slide
+    during turns, and the root height keeps the lowest point of the shoe soles on the floor (`isaac/pose.py`),
+  * the picker stands at an angle between the tote and the shelf, so the turn between them matches the captured one.
+
+  The clips are not redistributed here. To render with them, download these from [mixamo.com](https://www.mixamo.com)
+  (free Adobe account; FBX Binary, With Skin, 30 fps) into `mocap/fbx/` as `box_turn_b.fbx` ("Box Turn", turning
+  left carrying a box), `putting_down.fbx` ("Putting Down") and `picking_up.fbx` ("Picking Up"), then convert them
+  with `isaac/export_mocap.py`. Without `--mocap` the replay falls back to the earlier procedural poses
+  (`isaac/pose.py`: spine and knee bend per reach, arm IK, legs from NVIDIA's walk-in-place clip).
 * **Edited like a product video.** Five shots (establishing crane, a camera following one robot, a picking aisle, the
   packing area, an overview of the rest of the shift), each covering a different stretch of the shift at its own
   time-lapse rate, shown on screen with the clock and live KPIs.
@@ -50,8 +62,9 @@ One 8-hour shift under the learned masked-PPO dispatch policy, replayed inside N
 ```bash
 python tools/export_trace.py --policy maskable_ppo_dispatch.zip --minutes 480 --out media/trace.json
 # on a Linux RTX GPU with the nvcr.io/nvidia/isaac-sim:6.2.0 container
-/isaac-sim/python.sh isaac/replay_isaac.py --trace media/trace.json --out frames/ --preview  # one still per shot
-/isaac-sim/python.sh isaac/replay_isaac.py --trace media/trace.json --out frames/
+/isaac-sim/python.sh isaac/export_mocap.py --fbx mocap/fbx --out mocap/                    # Mixamo clips -> mocap/clip_*.npz
+/isaac-sim/python.sh isaac/replay_isaac.py --trace media/trace.json --mocap mocap/ --out frames/ --preview  # one still per shot
+/isaac-sim/python.sh isaac/replay_isaac.py --trace media/trace.json --mocap mocap/ --out frames/
 /isaac-sim/python.sh isaac/overlay.py frames/
 ffmpeg -framerate 30 -i frames/%04d.png -c:v libx264 -crf 18 -pix_fmt yuv420p media/demo_isaac.mp4
 ```

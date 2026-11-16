@@ -79,6 +79,7 @@ class Retargeter:
         t_bind = [mat_rot(m) for m in tg.GetBindTransformsAttr().Get()]
         self.t_rest = np.stack([r for r, _ in t_bind])
         t_pos = np.stack([t for _, t in t_bind])
+        self.t_bind_t = t_pos
         rest_local = tg.GetRestTransformsAttr().Get()
         self.t_local_rest = [mat_rot(m) for m in rest_local]
         self.t_trans = Vt.Vec3fArray([Gf.Vec3f(*map(float, t)) for _, t in self.t_local_rest])
