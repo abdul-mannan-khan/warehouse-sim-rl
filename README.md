@@ -42,7 +42,15 @@ One 8-hour shift under the learned masked-PPO dispatch policy, replayed inside N
   bounding box so the wheels sit on the floor) drive a two-lane route along the
   cross aisle into their zone, queue behind the robot being picked, and return on the opposite lane. Tote colour shows
   the order state: blue normal, red rush, green being picked, grey empty.
-* **People doing the actual work, from motion capture.** While the simulator says a pick is in progress, the
+* **Robots pick for themselves: no people in the warehouse.** Every iw.hub carries a dual-arm picking module
+  (`isaac/picker.py`): a mast on the rear deck, a torso that rises and turns on it, and two UR5e arms with Robotiq
+  2F-85 grippers on the torso's shoulders. Robots drive close to the racks. While the simulator says a pick is in
+  progress, the robot at the pick stop turns its torso to the rack, rises to the shelf, brings its hands in on both
+  sides of the parcel and slowly squeezes it between the finger pads, lifts it, pulls it back to its chest, turns
+  forward, sinks and sets it down on its own tray; the tray fills up parcel by parcel and the robot leaves with it.
+  Each hand move is a dense Cartesian path solved by IK step by step, so both arms keep one smooth, mirror-image
+  posture (elbows out and down) and joint speeds stay under the UR5e's limits.
+* **Human pickers (optional), from motion capture.** `--pickers people` brings back human pickers instead: the
   picker turns to the rack, takes a parcel off the shelf, turns back with it and bends at the knees to lower it into
   the robot's tote; the tote fills up item by item and leaves with them. NVIDIA's motion library
   has no pick or place motion, so the work is built from Adobe Mixamo motion-capture clips (a stepping turn and a
@@ -131,7 +139,7 @@ mlflow ui                          # http://127.0.0.1:5000
   for a learned-policy panel).
 * `tools/export_trace.py` + `isaac/replay_isaac.py` + `isaac/retarget.py` + `isaac/pose.py` + `isaac/overlay.py` —
   export one simulated shift as an event trace and replay it in NVIDIA Isaac Sim: the warehouse digital twin, iw.hub
-  robots on aisle routes, pickers handling parcels, UR5e arms packing (`isaac/arm.py`) (retargeted clips plus procedural reach, IK and
+  robots on aisle routes picking with their own dual-arm modules (`isaac/picker.py`), UR5e arms packing (`isaac/arm.py`) (retargeted clips plus procedural reach, IK and
   squat), a multi-shot camera, and RTX rendering through Replicator, driven frame by frame from the trace, with
   titles, clock and KPIs drawn on afterwards.
 

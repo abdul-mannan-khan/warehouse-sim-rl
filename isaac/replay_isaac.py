@@ -4,13 +4,16 @@
     /isaac-sim/python.sh isaac/replay_isaac.py --trace media/trace.json --out preview/ --preview
     add --mocap mocap/ to animate the workers with motion-capture clips (export_mocap.py, README)
     add --packers people to put human packers back at the packing tables instead of UR5e arms
+    add --pickers people to bring back human pickers instead of the robots' own dual-arm pickers
 
 The SimPy event trace drives everything. For each frame we compute where every order is in its life
 cycle (waiting, robot driving out, queueing at the picker, being picked, driving back) and place NVIDIA's
 iw.hub robots along aisle routes in the `full_warehouse` environment. The four picking zones of the model are
-mapped to four rack aisles and the depot to a packing area on the open floor. Pickers are NVIDIA's
-characters. While the simulator says a pick is in progress, the picker turns to the rack, takes a carton off
-the shelf and places it in the robot's tote. At the packing tables UR5e arms with Robotiq 2F-85 grippers move
+mapped to four rack aisles and the depot to a packing area on the open floor. There are no people: every
+iw.hub carries a dual-arm picking module (a mast with a lifting, turning torso and two UR5e arms with Robotiq
+grippers, picker.py). While the simulator says a pick is in progress, the robot at the pick stop turns its torso
+to the rack, rises to the shelf, squeezes the parcel between its two hands, pulls it out and sets it down on its
+own tray. At the packing tables UR5e arms with Robotiq 2F-85 grippers move
 items from the incoming bin into a shipping box while totes wait to be packed (arm.py: kinematics and IK; the
 replay poses the links directly, no physics). With --mocap the work is built on Adobe Mixamo motion capture
 (a stepping turn, a one-handed put-down with knee bend) retargeted onto the characters (mocap.py, work.py),
@@ -42,6 +45,8 @@ ap.add_argument("--frames", default="", help="comma-separated frame numbers to r
 ap.add_argument("--mocap", default="", help="folder with the clip_*.npz files written by export_mocap.py")
 ap.add_argument("--packers", choices=("arms", "people"), default="arms",
                 help="who works the packing tables: UR5e arms (default) or human packers")
+ap.add_argument("--pickers", choices=("robots", "people"), default="robots",
+                help="who picks: the AMRs' own dual-arm modules (default) or human pickers")
 args = ap.parse_args()
 W, H = map(int, args.res.split("x"))
 
@@ -59,6 +64,7 @@ from isaacsim.storage.native import get_assets_root_path  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import arm as armk                                     # noqa: E402
+import picker as pickm                                 # noqa: E402
 
 ROOT = get_assets_root_path()
 ENV = f"{ROOT}/Isaac/Environments/Simple_Warehouse/full_warehouse.usd"
@@ -85,7 +91,10 @@ SHIFT = T["minutes"]
 AISLE_X = [-22.85, -17.9, -12.95, -8.0, -3.0, 1.95]
 ZONE_AISLE = [AISLE_X[3], AISLE_X[2], AISLE_X[1], AISLE_X[0]]      # the four clear aisles; zone 1 nearest
 ZONE_PICK_Y = [12.5, 15.5, 18.5, 21.5]
-LANE = 0.85                      # out lane on the +x side of an aisle, return lane on the -x side
+PICKBOTS = args.pickers == "robots"
+# out lane on the +x side of an aisle, return lane on the -x side; robots that pick for themselves drive close to
+# the racks so their arms reach the shelf
+LANE = 1.30 if PICKBOTS else 0.85
 RACK_FACE = 1.925                 # pick face of the rack on the +x side of each aisle (from the scene bounds)
 SHELF_Z = 1.30                    # first shelf level above the floor pallets
 PICKER_DX = 1.50                  # picker stands between the robot stop and the rack face
@@ -93,19 +102,23 @@ CROSS_OUT, CROSS_BACK = 5.4, 6.8  # two-lane cross aisle in front of the racks
 DOCK_Y = -3.5
 DOCK_X = [-14.5 + 1.9 * r for r in range(T["n_robots"])]
 QUEUE_GAP = 1.6
-YAW_OFF = float(os.environ.get("YAW_OFF", -90.0))       # robot asset forward axis vs +x
+# robot asset forward axis vs +x. The iw.hub drives along its own x axis; the human-picker replay keeps its
+# original -90 so its videos stay reproducible.
+YAW_OFF = float(os.environ.get("YAW_OFF", 0.0 if PICKBOTS else -90.0))
+PICK_SHIFT = 0.62 if PICKBOTS else 0.0             # robots stop with their mast (0.62 m behind the axle) at the pick
+ROBOT_PICK_Y = [y + PICK_SHIFT for y in ZONE_PICK_Y]
 
 
 def path_out(o):
     r, z = o["robot"], o["zone"]
     x_in = ZONE_AISLE[z] + LANE
-    return [(DOCK_X[r], DOCK_Y), (DOCK_X[r], CROSS_OUT), (x_in, CROSS_OUT), (x_in, ZONE_PICK_Y[z])]
+    return [(DOCK_X[r], DOCK_Y), (DOCK_X[r], CROSS_OUT), (x_in, CROSS_OUT), (x_in, ROBOT_PICK_Y[z])]
 
 
 def path_back(o):
     r, z = o["robot"], o["zone"]
     x_in, x_back = ZONE_AISLE[z] + LANE, ZONE_AISLE[z] - LANE
-    py = ZONE_PICK_Y[z]
+    py = ROBOT_PICK_Y[z]
     return [(x_in, py), (x_in - 0.2, py + 0.9), (x_back, py + 0.9), (x_back, CROSS_BACK),
             (DOCK_X[r] + 0.6, CROSS_BACK), (DOCK_X[r] + 0.6, DOCK_Y + 0.8), (DOCK_X[r], DOCK_Y)]
 
@@ -192,7 +205,7 @@ def state_at(t):
             phase = "out"
         elif o["pick_end"] is None or t < o["pick_end"]:
             k = slot(o, t)
-            pos = np.array([ZONE_AISLE[z] + LANE, ZONE_PICK_Y[z] - QUEUE_GAP * k])
+            pos = np.array([ZONE_AISLE[z] + LANE, ROBOT_PICK_Y[z] - QUEUE_GAP * k])
             heading = math.pi / 2
             phase = "pick" if (o["pick_start"] is not None and t >= o["pick_start"] and k < 0.05) else "queue"
             if phase == "pick":
@@ -405,7 +418,8 @@ def picker_home(z):
 
 
 CHARS, CHAR_URL, CHAR_OPS = [], [], []
-for z in range(NZ):
+PK0 = 0 if PICKBOTS else NZ                         # index of the first packer among the characters
+for z in range(0 if PICKBOTS else NZ):
     path, url = f"/World/picker{z}", PEOPLE[z % len(PEOPLE)]
     CHAR_OPS.append(reference(path, url, (*picker_home(z), 0.0), 0.0))
     CHARS.append(path)
@@ -417,6 +431,10 @@ M["bin"] = material("bin", (0.25, 0.42, 0.62), rough=0.5)
 M["pedestal"] = material("pedestal", (0.32, 0.34, 0.37), rough=0.45, metal=0.3)
 M["plate"] = material("plate", (0.55, 0.57, 0.6), rough=0.3, metal=0.8)
 M["product"] = material("product", (0.93, 0.93, 0.9), rough=0.45)
+M["mast"] = material("mast", (0.16, 0.17, 0.19), rough=0.4, metal=0.5)
+M["torso"] = material("torso", (0.86, 0.87, 0.89), rough=0.35)
+M["head"] = material("head", (0.05, 0.05, 0.06), rough=0.25)
+M["eye"] = material("eye", (0.10, 0.75, 1.0), emit=2.5, rough=0.3)
 CART = (0.17, 0.21, 0.14)                         # parcel: depth, width, height (m)
 
 
@@ -558,16 +576,72 @@ ROBOT_TOP = float(rb.GetMax()[2]) if rb.GetSize()[0] > 0 else 0.35     # in the 
 for r, rbt in enumerate(robots):
     rbt["t"].Set(Gf.Vec3d(DOCK_X[r], DOCK_Y, ROBOT_Z))
 print("robot lift", ROBOT_Z, flush=True)
+PICKERS = []
+TRAY = (0.62, 0.44, 0.017, 0.03)                    # length, width, floor thickness, lip height
+
+
+def box_geom(path, centre, size, mat):
+    c = UsdGeom.Cube.Define(stage, path)
+    c.CreateSizeAttr(1.0)
+    c.AddTranslateOp().Set(Gf.Vec3d(*map(float, centre)))
+    c.AddScaleOp().Set(Gf.Vec3f(*map(float, size)))
+    bind(c.GetPrim(), mat)
+    return c
+
+
+def tray(path, pos):
+    """Flat tray with a low lip on the robot's deck (takes the order-state colour like the totes did)."""
+    L, Wd, t, lip = TRAY
+    xform(path, pos)
+    box_geom(path + "/floor", (0, 0, t / 2), (L, Wd, t), M["idle"])
+    for k, (c, sz) in enumerate((((L / 2, 0, lip / 2), (0.012, Wd, lip)), ((-L / 2, 0, lip / 2), (0.012, Wd, lip)),
+                                 ((0, Wd / 2, lip / 2), (L, 0.012, lip)), ((0, -Wd / 2, lip / 2), (L, 0.012, lip)))):
+        box_geom(f"{path}/lip{k}", c, sz, M["idle"])
+
+
+def add_pickbot(r):
+    """Mast, lifting and turning torso with a sensor head, and two UR5e arms on robot r (picker.py)."""
+    root = f"/World/robot{r}/pick"
+    xform(root)
+    mh = pickm.MAST_TOP - ROBOT_TOP
+    box_geom(root + "/mast", (pickm.MAST_X, 0, ROBOT_TOP + mh / 2), (0.09, 0.09, mh), M["mast"])
+    box_geom(root + "/foot", (pickm.MAST_X, 0, ROBOT_TOP + 0.02), (0.26, 0.26, 0.04), M["mast"])
+    tx = UsdGeom.Xform.Define(stage, root + "/torso")
+    t_op, r_op = tx.AddTranslateOp(), tx.AddRotateZOp()
+    box_geom(root + "/torso/body", (0, 0, -0.08), (0.20, 0.30, 0.32), M["torso"])
+    box_geom(root + "/torso/band", (0.101, 0, -0.02), (0.004, 0.24, 0.035), M["eye"])
+    box_geom(root + "/torso/head", (0.03, 0, 0.13), (0.12, 0.20, 0.08), M["head"])
+    box_geom(root + "/torso/eyes", (0.091, 0, 0.135), (0.004, 0.15, 0.022), M["eye"])
+    for side in (+1, -1):                            # shoulder blocks carrying the arm bases
+        box_geom(root + f"/torso/shoulder{'L' if side > 0 else 'R'}", (0, side * 0.175, -0.035),
+                 (0.13, 0.07, 0.13), M["torso"])
+    arms = {}
+    for side, nm in ((+1, "L"), (-1, "R")):
+        ap_ = root + f"/torso/arm{nm}"
+        ax_ = UsdGeom.Xform.Define(stage, ap_)
+        ax_.AddTransformOp().Set(Gf.Matrix4d(*pickm.MOUNT[side].T.flatten().tolist()))
+        a = stage.DefinePrim(ap_ + "/asset", "Xform")
+        a.GetReferences().AddReference(A_ARM)
+        vs = a.GetVariantSets()
+        for k, v in (("Gripper", "Robotiq_2f_85"), ("Physics", "None"), ("Sensor", "None")):
+            if vs.HasVariantSet(k):
+                vs.GetVariantSet(k).SetVariantSelection(v)
+        arms[side] = {"root": ap_}
+    PICKERS.append({"t": t_op, "r": r_op, "arms": arms})
 for r, rbt in enumerate(robots):
     path = f"/World/robot{r}/tote"
-    reference(path, A_TOTE, (0.0, 0.0, ROBOT_TOP + 0.01), 90.0 - YAW_OFF)
-    fit(path, 0.6)
+    if PICKBOTS:                                     # low tray: the arms set parcels down on it
+        tray(path, (0.0, 0.0, ROBOT_TOP + 0.005))
+        add_pickbot(r)
+    else:
+        reference(path, A_TOTE, (0.0, 0.0, ROBOT_TOP + 0.01), 90.0 - YAW_OFF)
+        fit(path, 0.6)
     tote_geo = stage.GetPrimAtPath(path)
     bind(tote_geo, M["idle"])
     rbt["tote"] = tote_geo
 tg = bbox(robots[0]["tote"])
 print("tote bbox", tg.GetMin(), tg.GetMax(), flush=True)
-ITEM_Z = ROBOT_TOP + 0.045 + CART[2] / 2
+ITEM_Z = ROBOT_TOP + (0.027 if PICKBOTS else 0.045) + CART[2] / 2
 SLOTS = [(-0.09, 0.0, 0.0), (0.09, 0.0, 0.0), (0.0, 0.0, CART[2])]
 for rbt in robots:
     for k, it in enumerate(rbt["items"]):
@@ -666,7 +740,7 @@ for i, c in enumerate(CHARS):
     root = t_op.Get()
     WORKERS.append({"a": a, "url": url, "poser": ps, "t": t_op, "r": r_op, "xy": np.array([root[0], root[1]]),
                     "z0": float(root[2]), "fwd": math.atan2(ps.fwd_r[1], ps.fwd_r[0]), "phase": int(FPS * 1.37 * i),
-                    "carton": HAND[i]})
+                    "carton": HAND[i + (NZ if PICKBOTS else 0)]})
     print("worker", c, "body forward in root frame", np.round(ps.fwd_r, 3), "arm", round(ps.arm_len, 3),
           "rest foot h", round(ps.foot_h0, 3), flush=True)
     ps.pose(CLIPS[(url, "idle")][0])
@@ -810,16 +884,22 @@ def pick_cycles(o, rate):
     """Shelf-to-tote cycles shown for an order's pick at this time-lapse rate (0: too fast to show)."""
     end = o["pick_end"] if o["pick_end"] is not None else SHIFT          # still being picked at the end of the shift
     pv = (end - o["pick_start"]) * 60.0 / rate
-    if MOCAP:
-        cyc = wkm.PICK_CYCLE
+    if PICKBOTS or MOCAP:
+        cyc = PICKBOT_T if PICKBOTS else wkm.PICK_CYCLE
         return 0 if pv < 0.72 * cyc else max(1, int(pv / cyc))
     if pv < 2.4:
         return 0
     return max(1, int(pv / 4.2))
 
 
+PICKBOT_T = 6.0                                    # seconds of video per shelf-to-tray pick (nominal)
+
+
 def shelf_point(z, k):
-    dy = ((-0.10, 0.05, -0.02, 0.12) if MOCAP else (-0.32, 0.18, 0.38, -0.08))[k % 4]
+    if PICKBOTS:
+        dy = (-0.05, 0.03, -0.02, 0.05)[k % 4]
+    else:
+        dy = ((-0.10, 0.05, -0.02, 0.12) if MOCAP else (-0.32, 0.18, 0.38, -0.08))[k % 4]
     return np.array([ZONE_AISLE[z] + RACK_FACE + 0.03, ZONE_PICK_Y[z] + dy, SHELF_Z + CART[2] / 2 + 0.005])
 
 
@@ -838,7 +918,7 @@ def animate_workers(f, st, rate):
     for r, (pos, heading, phase, rush, z, o) in st["robots"].items():
         if phase == "back":
             items[r] = min(max(pick_cycles(o, rate), 1), 3)
-    for z in range(NZ):
+    for z in range(0 if PICKBOTS else NZ):
         W = WORKERS[z]
         o = st["picking"][z]
         psi_idle = math.pi                                  # facing the aisle and the robot stop
@@ -862,11 +942,13 @@ def animate_workers(f, st, rate):
         m["A"], m["A_yaw"] = A, 0.0
         items[o["robot"]] = min(idx + (1 if m["placed"] else 0), 3)
         drive(W, sec, m, psi_idle)
+    if PICKBOTS:
+        animate_pickbots(f, st, rate, items)
     if ARMS:
         animate_arms(f, sec, rate)
         return items
     for i, (sup, box) in enumerate(STATIONS):
-        W = WORKERS[NZ + i]
+        W = WORKERS[PK0 + i]
         cyc = (sec + 1.3 * i) / PACK_T
         u = cyc - int(cyc)
         f0 = max(f - int(u * PACK_T * FPS), SHOT_START[PLAN[f][0]])
@@ -905,6 +987,75 @@ def animate_arms(f, sec, rate):
                 T = cyc.held_pose(q)
                 it["t"].Set(Gf.Vec3d(*map(float, T[:3, 3] + b)))
                 it["r"].Set(math.degrees(math.atan2(T[1, 1], T[0, 1])))
+
+
+PICKS = {}                                         # (zone, shelf spot, tray slot) -> picker.Pick
+
+
+def to_robot(pos, heading, p):
+    a = heading + math.radians(YAW_OFF)
+    c, s_ = math.cos(a), math.sin(a)
+    d = np.asarray(p, float) - np.array([pos[0], pos[1], ROBOT_Z])
+    return np.array([c * d[0] + s_ * d[1], -s_ * d[0] + c * d[1], d[2]])
+
+
+def robot_tf(pos, heading):
+    T = armk.rz(heading + math.radians(YAW_OFF))
+    T[:3, 3] = [pos[0], pos[1], ROBOT_Z]
+    return T
+
+
+def pose_pickbot(r, d):
+    K = PICKERS[r]
+    K["t"].Set(Gf.Vec3d(pickm.MAST_X, 0.0, float(d["h"])))
+    K["r"].Set(math.degrees(d["psi"]))
+    for side, A in K["arms"].items():
+        pose_arm(A, d["q"][side], pickm.CLOSED)
+
+
+def animate_pickbots(f, st, rate, items):
+    """Every robot's picking module: the robot being picked at each zone runs shelf-to-tray picks, the others
+    travel in the park pose. Fills items (robot -> parcels on its tray)."""
+    busy = {}
+    for z in range(NZ):
+        o = st["picking"][z]
+        pc = HAND[z]
+        show(pc["prim"], False)
+        if o is None:
+            continue
+        r = o["robot"]
+        pos, heading = st["robots"][r][:2]
+        n = pick_cycles(o, rate)
+        end = o["pick_end"] if o["pick_end"] is not None else SHIFT
+        frac = (PLAN[f][1] - o["pick_start"]) / max(end - o["pick_start"], 1e-9)
+        if n == 0:
+            items[r] = 1 if frac > 0.5 else 0
+            continue
+        c = min(max(frac, 0.0) * n, n - 1e-6)
+        idx = int(c)
+        slot = SLOTS[min(idx, 2)]
+        key = (z, idx % 4, min(idx, 2))
+        if key not in PICKS:
+            A = shelf_point(z, idx)
+            PICKS[key] = pickm.Pick(to_robot(pos, heading, A), (slot[0], slot[1], ITEM_Z + slot[2] + 0.004))
+        pk = PICKS[key]
+        d = pk.at(c - idx)
+        busy[r] = d
+        items[r] = min(idx + (1 if d["parcel"] == "placed" else 0), 3)
+        if d["parcel"] == "shelf":
+            A = shelf_point(z, idx)
+            pc["t"].Set(Gf.Vec3d(*map(float, A)))
+            pc["r"].Set(0.0)
+            show(pc["prim"], True)
+        elif d["parcel"] == "held":
+            T = robot_tf(pos, heading) @ pickm.torso_pose(d["psi"], d["h"])
+            p = (T @ np.append(d["c"], 1.0))[:3]
+            pc["t"].Set(Gf.Vec3d(*map(float, p)))
+            pc["r"].Set(math.degrees(heading) + YAW_OFF + math.degrees(d["psi"]))
+            show(pc["prim"], True)
+    park = pickm.park()
+    for r in range(len(PICKERS)):
+        pose_pickbot(r, busy.get(r, park))
 
 
 def _set_pose(prim, T):
@@ -1015,7 +1166,7 @@ def animate_workers_mocap(f, st, rate):
     for r, (pos, heading, phase, rush, z, o) in st["robots"].items():
         if phase == "back":
             items[r] = min(max(pick_cycles(o, rate), 1), 3)
-    for z in range(NZ):
+    for z in range(0 if PICKBOTS else NZ):
         W = WORKERS[z]
         o = st["picking"][z]
         stop = np.array([ZONE_AISLE[z] + LANE, ZONE_PICK_Y[z], ITEM_Z])
@@ -1041,11 +1192,13 @@ def animate_workers_mocap(f, st, rate):
         B = robot_point(pos, heading, (slot[0], slot[1], ITEM_Z + slot[2] + 0.01))
         placed = mocap_pose(W, sec, tc, D, wkm.PICK_SEG, A, B, ("pick", idx % 4, min(idx, 2)), e)
         items[o["robot"]] = min(idx + (1 if placed else 0), 3)
+    if PICKBOTS:
+        animate_pickbots(f, st, rate, items)
     if ARMS:
         animate_arms(f, sec, rate)
         return items
     for i, (sup, box) in enumerate(STATIONS):
-        W = WORKERS[NZ + i]
+        W = WORKERS[PK0 + i]
         D = wkm.PACK_CYCLE
         cyc = (sec + 1.3 * i) / D
         u = cyc - int(cyc)
@@ -1096,7 +1249,9 @@ def precompute_follow():
         pos = p.copy() if pos is None else pos + (p - pos) * 0.25
         fwd = d.copy() if fwd is None else fwd + (d - fwd) * 0.06
         fwd = fwd / max(np.linalg.norm(fwd), 1e-6)
-        eye = (pos[0] - fwd[0] * 4.2 + fwd[1] * 1.2, pos[1] - fwd[1] * 4.2 - fwd[0] * 1.2, 2.6)
+        # offset to the robot's right; robots that pick drive close to the racks there, so they get it on the left
+        so, ez = (-1.2, 3.0) if PICKBOTS else (1.2, 2.6)
+        eye = (pos[0] - fwd[0] * 4.2 + fwd[1] * so, pos[1] - fwd[1] * 4.2 - fwd[0] * so, ez)
         tgt = (pos[0] + fwd[0] * 2.5, pos[1] + fwd[1] * 2.5, 0.5)
         out[f] = (eye, tgt, 16.0)
     return out
@@ -1191,8 +1346,11 @@ def apply(f):
         caption = "Following robot {} to Zone {} ({} order)".format(ex["robot"] + 1, ex["order"]["zone"] + 1,
                                                                    "rush" if ex["order"]["rush"] else "normal")
     else:
-        caption = {"establish": "NVIDIA warehouse digital twin: 4 picking zones, packing area, 6 iw.hub robots",
-                   "aisle": f"Zone {ex.get('zone', 0) + 1}: the picker loads each robot's tote while the next ones queue",
+        caption = {"establish": ("NVIDIA warehouse digital twin: 4 picking zones, packing area, 6 iw.hub robots"
+                                 + (" with dual-arm pickers" if PICKBOTS else "")),
+                   "aisle": (f"Zone {ex.get('zone', 0) + 1}: the robot picks each parcel off the shelf with both arms "
+                             "while the next ones queue" if PICKBOTS else
+                             f"Zone {ex.get('zone', 0) + 1}: the picker loads each robot's tote while the next ones queue"),
                    "depot": ("Packing area: UR5e arms pack picked items for shipping; idle robots wait at their docks"
                              if ARMS else
                              "Packing area: picked items are packed for shipping; idle robots wait at their docks"),
