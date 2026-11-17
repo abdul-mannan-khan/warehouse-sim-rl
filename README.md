@@ -18,7 +18,7 @@ video: [media/demo.mp4](media/demo.mp4) — regenerate with `python render_video
 
 *Full 60-second video at 1080p: [media/demo_isaac.mp4](media/demo_isaac.mp4) (the preview above runs at 3x speed).*
 
-| Following one robot to its pick zone | A picker loading a robot's tote while the next robots queue |
+| Following one robot to its pick zone | A robot picking a parcel with both hands while the next robots queue |
 |---|---|
 | ![Follow camera](media/isaac_follow.jpg) | ![Pick aisle](media/isaac_aisle.jpg) |
 
@@ -38,9 +38,9 @@ One 8-hour shift under the learned masked-PPO dispatch policy, replayed inside N
   damped least-squares IK for a top-down grasp (vertical moves re-solved every frame), and the gripper's parallelogram
   finger linkage. `--packers people` puts human packers back.
 * **Real warehouse layout.** The model's four picking zones are four rack aisles; the depot is a packing area with
-  six robot docks on the open floor. Robots (NVIDIA's iw.hub AMR carrying a KLT tote, raised by the asset's own
+  six robot docks on the open floor. Robots (NVIDIA's iw.hub AMR carrying a tray, raised by the asset's own
   bounding box so the wheels sit on the floor) drive a two-lane route along the
-  cross aisle into their zone, queue behind the robot being picked, and return on the opposite lane. Tote colour shows
+  cross aisle into their zone, queue behind the robot being picked, and return on the opposite lane. Tray colour shows
   the order state: blue normal, red rush, green being picked, grey empty.
 * **Robots pick for themselves: no people in the warehouse.** Every iw.hub carries a dual-arm picking module
   (`isaac/picker.py`): a mast on the rear deck, a torso that rises and turns on it, and two UR5e arms with Robotiq
@@ -139,8 +139,8 @@ mlflow ui                          # http://127.0.0.1:5000
   for a learned-policy panel).
 * `tools/export_trace.py` + `isaac/replay_isaac.py` + `isaac/retarget.py` + `isaac/pose.py` + `isaac/overlay.py` —
   export one simulated shift as an event trace and replay it in NVIDIA Isaac Sim: the warehouse digital twin, iw.hub
-  robots on aisle routes picking with their own dual-arm modules (`isaac/picker.py`), UR5e arms packing (`isaac/arm.py`) (retargeted clips plus procedural reach, IK and
-  squat), a multi-shot camera, and RTX rendering through Replicator, driven frame by frame from the trace, with
+  robots on aisle routes picking with their own dual-arm modules (`isaac/picker.py`), UR5e arms packing (`isaac/arm.py`), optional
+  motion-captured human pickers and packers, a multi-shot camera, and RTX rendering through Replicator, driven frame by frame from the trace, with
   titles, clock and KPIs drawn on afterwards.
 
 ## Results (default configuration, 1.8 orders/minute, 20 held-out shifts)
